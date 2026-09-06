@@ -1247,7 +1247,10 @@ function App({
                             <td>{money(level.buy)}</td>
                             <td>{money(level.sell)}</td>
                             <td>
-                              {level.quantity}
+                              {String(level.quantity).replace(
+                                /(\.\d*?[1-9])0+$|\.0+$/,
+                                "$1",
+                              )}
                               {unit}
                             </td>
                           </tr>
