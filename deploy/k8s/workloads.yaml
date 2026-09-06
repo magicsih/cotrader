@@ -23,6 +23,7 @@ spec:
             - configMapRef: {name: cotrader-config}
             - secretRef: {name: cotrader-database}
             - secretRef: {name: cotrader-toss}
+            - secretRef: {name: cotrader-upbit, optional: true}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

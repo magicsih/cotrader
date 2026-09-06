@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     live_enabled: bool = False
     account_reads_enabled: bool = False
     telegram_enabled: bool = False
+    upbit_enabled: bool = False
+    upbit_account_reads_enabled: bool = False
+    capital_krw: Decimal = Field(default=Decimal("1000000"), gt=0, le=10000000)
+    daily_loss_krw: Decimal = Field(default=Decimal("10000"), gt=0)
+    drawdown_krw: Decimal = Field(default=Decimal("50000"), gt=0)
+    upbit_access_key: SecretStr = Field(default=SecretStr(""), validation_alias="UPBIT_OPEN_API_ACCESS_KEY")
+    upbit_secret_key: SecretStr = Field(default=SecretStr(""), validation_alias="UPBIT_OPEN_API_SECRET_KEY")
     capital_usd: Decimal = Field(default=Decimal("5000"), gt=0)
     daily_loss_usd: Decimal = Field(default=Decimal("50"), gt=0)
     drawdown_usd: Decimal = Field(default=Decimal("250"), gt=0)
@@ -35,6 +42,15 @@ class Settings(BaseSettings):
     telegram_token: SecretStr = Field(default=SecretStr(""), validation_alias="TELEGRAM_API_KEY")
     telegram_me: int = Field(default=0, validation_alias="TELEGRAM_ME")
     static_dir: str = "web/dist"
+
+    def capital_for(self, venue):
+        return self.capital_krw if venue == "upbit" else self.capital_usd
+
+    def risk_for(self, venue):
+        return {
+            "daily_loss": str(self.daily_loss_krw if venue == "upbit" else self.daily_loss_usd),
+            "drawdown": str(self.drawdown_krw if venue == "upbit" else self.drawdown_usd),
+        }
 
     @model_validator(mode="after")
     def secure_configuration(self):

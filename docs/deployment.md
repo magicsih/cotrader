@@ -26,18 +26,19 @@
 - `cotrader-database`: `COTRADER_DATABASE_URL` — 런타임 전용 DB 연결.
 - `cotrader-migration-database`: `COTRADER_DATABASE_URL` — 별도 DDL 연결.
 - `cotrader-toss`: `TOSS_INVEST_OPEN_API_CLIENT_ID`, `TOSS_INVEST_OPEN_API_CLIENT_SECRET`, `COTRADER_ACCOUNT_SEQ`.
+- `cotrader-upbit`: 선택 항목, `UPBIT_OPEN_API_ACCESS_KEY`, `UPBIT_OPEN_API_SECRET_KEY`. 실제 키가 필요한 계좌 조회를 사용할 때만 생성한다.
 - `cotrader-identity`: `TELEGRAM_API_KEY`, `TELEGRAM_ME`, `COTRADER_SESSION_SECRET`, `COTRADER_GITHUB_CLIENT_ID`, `COTRADER_GITHUB_CLIENT_SECRET`, `COTRADER_GITHUB_USER_ID`.
 
 원본 키는 사용자가 지정한 `~/.config/tossinvest/openapi.env`, `~/.config/tossinvest/telegram.env`다. 새 키로 대체하지 않는다. 파일의 실제 값은 대화·로그·Git·이미지에 넣지 않는다. 배포 전 소유자 전용 파일 권한을 확인한다. 세션 서명과 DB 비밀번호는 새 앱 전용 자격증명으로 관리하고 공용 root DB 비밀번호를 앱에 제공하지 않는다.
 
-Toss 키는 engine에만, Telegram 토큰과 세션 서명은 api에만 주입한다. research는 DB 연결만 사용한다.
+Toss·Upbit 키는 engine에만, Telegram 토큰과 세션 서명은 api에만 주입한다. research는 DB 연결만 사용한다. 업비트 공개 시세는 `COTRADER_UPBIT_ENABLED=true`, 계좌 조회는 `COTRADER_UPBIT_ACCOUNT_READS_ENABLED=true`를 추가로 설정한다. 기본 배포 예제는 두 값이 false다. 원화 모의 예산·손실 기준은 `COTRADER_CAPITAL_KRW`, `COTRADER_DAILY_LOSS_KRW`, `COTRADER_DRAWDOWN_KRW`로 달러 설정과 분리한다.
 
 ## 실행 순서
 
 1. 빌드·Python 테스트·MySQL 통합 테스트·웹뷰 빌드를 통과시킨다. `kubectl kustomize deploy/k8s`로 출력물을 검토한다.
 2. `main`에 반영된 커밋은 CI 테스트·양쪽 아키텍처 빌드를 통과한 후 GitHub Container Registry에 `sha-<commit>` 이미지로 게시된다. PR에서는 게시하지 않는다. 처음 생성된 GitHub 패키지는 private이므로 공개 소스만 포함함을 검증한 후 패키지를 public으로 설정하고 비인증 이미지 조회를 확인한다. CI 요약에 기록된 digest로 운영 이미지를 고정한다. 승인된 원격 저장소와 이미지 registry 경로를 확정하고 이미지를 게시한다. `REPLACE_WITH_VERIFIED_COMMIT` 두 곳을 실제 검증된 버전으로 바꾼다. 버전 문자열 그대로는 배포할 수 없다.
 3. DB·Secret·DNS·백업 준비를 완료한다. Secret 동기화는 값이 출력되지 않는 승인된 운영 경로를 사용한다.
-4. `deploy/migration-job.yaml`의 일회성 마이그레이션을 실행·확인한다. 진행 중인 engine과 동시에 스키마를 변경하지 않는다.
+4. `deploy/migration-job.yaml`의 일회성 마이그레이션을 실행·확인한다. 진행 중인 engine과 동시에 스키마를 변경하지 않는다. 시장 분리 버전 `a781c092b5d3`은 기존 데이터를 Toss로 유지하면서 계좌 키·봉 고유 키를 변경하므로 API·engine·research를 모두 중지한 뒤 수행한다. 백업의 복원 검증을 먼저 마치고 새 이미지로 세 역할을 재개한다. 이 버전은 서로 다른 통화의 원장을 합치는 자동 다운그레이드를 제공하지 않는다.
 5. `COTRADER_LIVE_ENABLED=false`를 확인하고 세 역할을 배포한다. API와 DB 연결, GitHub 본인 인증, 시세·캘린더·수집을 확인한다.
 6. 여러 실제 거래일 동안 모의 전략을 운영한다. 휴장·세션 전환, 재시작, 네트워크 끊김, 부분 체결 모의, 전체 중단, 비용·원장 대조를 확인한다.
 7. 실제 데이터 커버리지와 기업행사 영향을 검토하고 사용자가 실거래 종목·예산·위험 기준을 다시 승인할 때에만 별도 실거래 전환 작업을 한다.
@@ -67,4 +68,4 @@ DB 백업은 `mysqldump --single-transaction` 기반으로 cotrader 스키마를
 - 복구 후 자동 재전송은 9분 이내의 같은 주문 의도에만 허용된다. 이미 중단한 전략이나 오래된 미확인 주문에는 재전송하지 않는다.
 - 롤백은 먼저 주문을 중단한 상태에서 이전 이미지로 수행한다. 원장 DB를 과거 백업으로 되돌리면 실제 증권사 주문과 달라질 수 있으므로 자동 DB 다운그레이드나 무조건 복원을 하지 않는다.
 
-첫 버전의 통계는 달러 기준의 봇 운용 기록이다. 계좌 전체 입출금·배당·기업행사의 자동 대사는 포함하지 않는다. 수동 거래·입출금·분할 후에는 봇 원장과 계좌를 확인한 다음 재개한다.
+통계는 시장별 USD·KRW 기준의 봇 운용 기록이다. 계좌 전체 입출금·배당·기업행사의 자동 대사는 포함하지 않는다. 수동 거래·입출금·분할 후에는 봇 원장과 계좌를 확인한 다음 재개한다. `/guide`와 정적 파일만 공개이며 두 시장의 계좌·주문·연구 API는 본인 인증이 필요하다.

@@ -20,6 +20,7 @@ from cotrader.domain import (
     initial_state,
     tick,
 )
+from cotrader.markets import round_quantity
 
 DEFAULT_DAILY_LOSS = D("50")
 DEFAULT_DRAWDOWN = D("250")
@@ -81,9 +82,9 @@ def backtest(
         # A decision formed at the previous close can only fill in a later bar.
         if pending and not halted:
             crossed = bar.low < pending.price if pending.side == "BUY" else bar.high > pending.price
-            cap = (bar.volume * D("0.01")).to_integral_value(rounding="ROUND_DOWN")
+            cap = round_quantity(bar.volume * D("0.01"), spec.venue)
             quantity = min(pending.quantity, cap)
-            if crossed and quantity >= 1:
+            if crossed and quantity > 0:
                 # Do not invent price improvement. Limit price bounds every fill.
                 price = pending.price
                 amount = quantity * price
@@ -141,9 +142,7 @@ def backtest(
         if index % max(1, len(bars) // 500) == 0 or index == len(bars) - 1:
             curve.append({"at": bar.at.isoformat(), "equity": str(value)})
     final = equity(state, bars[-1].close)
-    hold_qty = (spec.budget / (bars[0].open * (1 + spec.commission_rate))).to_integral_value(
-        rounding="ROUND_DOWN"
-    )
+    hold_qty = round_quantity(spec.budget / (bars[0].open * (1 + spec.commission_rate)), spec.venue)
     benchmark = spec.budget - hold_qty * bars[0].open * (1 + spec.commission_rate) + hold_qty * bars[-1].close
     digest = dataset_hash(bars)
     return {
@@ -168,8 +167,11 @@ def backtest(
         "bar_count": len(bars),
         "gaps": gaps,
         "config": spec.model_dump(mode="json"),
+        "venue": spec.venue,
+        "currency": "KRW" if spec.venue == "upbit" else "USD",
         "limitations": [
             "1분봉 기반 추정: 같은 봉 안의 연쇄 매수·매도는 실행하지 않습니다.",
+            "현재 거래 단위를 사용하며 과거 호가 정책 변경을 재현하지 않습니다.",
             "가격선 단순 접촉은 미체결, 거래량의 1%까지만 체결로 가정합니다.",
             "스프레드는 설정한 편도 체결 비용으로 가정합니다. 실제 호가·대기 순서는 재현하지 못합니다.",
             "수수료는 설정값이며 배당·분할·환율·양도소득세를 반영하지 않습니다.",
@@ -210,8 +212,8 @@ def grid_candidate(base, axes, params):
         **{
             **base.model_dump(),
             "kind": "grid",
-            "lower": tick(lower),
-            "upper": tick(upper),
+            "lower": tick(lower, base.venue),
+            "upper": tick(upper, base.venue),
             "grids": params["grids"],
             "spacing": params["spacing"],
             **gates[params["gate"]],

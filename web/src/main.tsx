@@ -2,6 +2,14 @@ import React, { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { ResearchLibrary } from "./ResearchLibrary";
+import { Guide } from "./Guide";
+import {
+  MarketContext,
+  Venue,
+  marketInfo,
+  useMarket,
+  formatMoney,
+} from "./Market";
 
 type Data = Record<string, any>;
 type Tab = "overview" | "strategies" | "research" | "orders";
@@ -11,14 +19,6 @@ declare global {
   }
 }
 
-const money = (value: unknown) =>
-  value == null
-    ? "—"
-    : new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency: "USD",
-        maximumFractionDigits: 2,
-      }).format(Number(value));
 const when = (value: string) =>
   new Date(
     value.endsWith("Z") || /[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`,
@@ -117,6 +117,7 @@ function Chart({
   data: { at: string; equity: string }[];
   empty?: string;
 }) {
+  const { money } = useMarket();
   if (data.length < 2)
     return (
       <div className="chart-empty">
@@ -172,8 +173,41 @@ function Chart({
   );
 }
 
-function App() {
-  const [tab, setTab] = useState<Tab>("overview");
+function TradingApp() {
+  const query = new URLSearchParams(window.location.search);
+  const [venue, setVenue] = useState<Venue>(
+    query.get("venue") === "upbit" ? "upbit" : "toss",
+  );
+  return (
+    <MarketContext.Provider value={venue}>
+      <App
+        venue={venue}
+        onVenue={(next) => {
+          const params = new URLSearchParams(window.location.search);
+          params.set("venue", next);
+          params.delete("symbol");
+          window.history.replaceState(null, "", `/?${params}`);
+          setVenue(next);
+        }}
+        key={venue}
+      />
+    </MarketContext.Provider>
+  );
+}
+
+function App({
+  venue,
+  onVenue,
+}: {
+  venue: Venue;
+  onVenue: (venue: Venue) => void;
+}) {
+  const { money, currency, unit } = useMarket();
+  const [tab, setTab] = useState<Tab>(
+    new URLSearchParams(window.location.search).get("view") === "research"
+      ? "research"
+      : "overview",
+  );
   const [mode, setMode] = useState("paper");
   const [status, setStatus] = useState<Data>({});
   const [account, setAccount] = useState<Data>({});
@@ -218,30 +252,38 @@ function App() {
   const refresh = useCallback(async () => {
     if (!auth) return;
     const values = await Promise.all([
-      api("/status"),
-      api(`/portfolio?mode=${mode}`),
+      api(`/status?venue=${venue}`),
+      api(`/portfolio?mode=${mode}&venue=${venue}`),
       api("/strategies"),
-      api(`/orders?mode=${mode}`),
+      api(`/orders?mode=${mode}&venue=${venue}`),
       api("/events"),
-      api(`/snapshots?mode=${mode}`),
+      api(`/snapshots?mode=${mode}&venue=${venue}`),
       api("/datasets"),
       api("/backtests"),
       api("/commands"),
-      api("/account"),
+      api(`/account?venue=${venue}`),
       api("/recommendations"),
     ]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
-    setStrategies(values[2]);
+    setStrategies(values[2].filter((row: Data) => row.venue === venue));
     setOrders(values[3]);
     setEvents(values[4]);
     setSnapshots(values[5]);
-    setDatasets(values[6]);
-    setJobs(values[7]);
+    setDatasets(values[6].filter((row: Data) => row.venue === venue));
+    setJobs(
+      values[7].filter(
+        (row: Data) => (row.request.spec.venue || "toss") === venue,
+      ),
+    );
     setCommands(values[8]);
     setAccount(values[9]);
-    setSaved(values[10]);
-  }, [auth, mode]);
+    setSaved(
+      values[10].filter(
+        (row: Data) => (row.evidence.spec.venue || "toss") === venue,
+      ),
+    );
+  }, [auth, mode, venue]);
 
   const showError = useCallback((e: Error) => {
     if (e instanceof ApiError && e.status === 401) setAuth(false);
@@ -297,6 +339,9 @@ function App() {
         <section className="panel login-panel">
           <span className="eyebrow">COTRADER</span>
           <h1>내 트레이딩 데스크</h1>
+          <a className="outline" href="/guide">
+            처음이라면 사용 가이드 열기 →
+          </a>
           <p>
             계좌와 거래 기록은 허용된 본인 계정으로 로그인한 뒤 확인할 수
             있습니다.
@@ -333,7 +378,7 @@ function App() {
             c<span>↗</span>
           </span>
           <div>
-            cotrader<small>PERSONAL TRADING DESK</small>
+            cotrader<small>내 투자 기록</small>
           </div>
         </a>
         <nav>
@@ -358,6 +403,9 @@ function App() {
               </button>
             ),
           )}
+          <a className="guide-nav" href="/guide">
+            사용 가이드 ↗
+          </a>
         </nav>
         <div className="sidebar-note">
           <span className="eyebrow">운영 원칙</span>
@@ -367,19 +415,30 @@ function App() {
             모든 판단을 기록합니다.
           </p>
           <small>
-            미국 주식 · 일반 ETF
+            미국 주식 · 원화 코인
             <br />
-            토스증권 Open API
+            토스증권 · 업비트
           </small>
         </div>
         <div className="sidebar-bottom">
           <span className={`dot ${connected ? "green" : ""}`} />
           {connected ? "실행기 연결됨" : "실행기 연결 대기"}
-          <small>개인 계좌 전용 · USD</small>
+          <small>개인 계좌 전용 · {currency}</small>
         </div>
       </aside>
       <main>
         <header className="topbar">
+          <label className="market-picker">
+            시장
+            <select
+              aria-label="시장 선택"
+              value={venue}
+              onChange={(e) => onVenue(e.target.value as Venue)}
+            >
+              <option value="toss">토스 미국 주식 · USD</option>
+              <option value="upbit">업비트 코인 · KRW</option>
+            </select>
+          </label>
           <span className="breadcrumb">
             내 트레이딩 데스크 <span>/</span> {titles[tab]}
           </span>
@@ -394,7 +453,7 @@ function App() {
               className={mode === "live" ? "selected live" : ""}
               onClick={() => setMode("live")}
             >
-              실거래
+              실거래 기록
             </button>
           </div>
           {authMode !== "local" && (
@@ -424,11 +483,28 @@ function App() {
             <button
               className="primary"
               onClick={() => setShowForm(true)}
-              disabled={!auth}
+              disabled={!auth || (venue === "upbit" && mode === "live")}
             >
               <Icon name="plus" />새 전략
             </button>
           </div>
+          <div className="getting-started">
+            <div>
+              <strong>처음 시작하시나요?</strong>
+              <p>
+                실제 종목 데이터 수집부터 모의매매까지, 단계별로 따라오세요.
+              </p>
+            </div>
+            <a className="primary" href="/guide">
+              사용 가이드 열기 →
+            </a>
+          </div>
+          {venue === "upbit" && (
+            <div className="banner">
+              업비트 원화 마켓 · 실제 시세를 이용한 연구·모의매매와 계좌 조회를
+              지원합니다. 실제 주문은 제공하지 않습니다.
+            </div>
+          )}
           {error && (
             <div className="banner danger" role="alert">
               {error}
@@ -604,7 +680,7 @@ function App() {
                         action: "pause_all",
                         title: "전체 전략을 중단할까요?",
                         detail:
-                          "봇의 대기 주문을 취소하고 보유 주식은 유지합니다. 취소 확인 전까지 체결될 수 있습니다.",
+                          "봇의 대기 주문을 취소하고 보유 자산은 유지합니다. 취소 확인 전까지 체결될 수 있습니다.",
                         payload: {},
                       })
                     }
@@ -621,7 +697,7 @@ function App() {
                           title: "손실 기준을 재설정할까요?",
                           detail:
                             "현재 평가금액을 새 기준으로 삼아 추가 손실 허용 범위를 다시 부여합니다. 전략은 별도로 재개해야 합니다.",
-                          payload: { mode, confirm: "RESET_ANCHORS" },
+                          payload: { mode, venue, confirm: "RESET_ANCHORS" },
                         })
                       }
                     >
@@ -676,7 +752,10 @@ function App() {
                         </div>
                         <div>
                           <small>보유 수량</small>
-                          <strong>{Number(s.state.quantity)}주</strong>
+                          <strong>
+                            {Number(s.state.quantity)}
+                            {unit}
+                          </strong>
                         </div>
                       </div>
                       {s.config.kind === "grid" && (
@@ -787,6 +866,7 @@ function App() {
           {tab === "research" && (
             <>
               <Research
+                commands={commands}
                 busy={busy}
                 datasets={datasets}
                 strategies={strategies}
@@ -930,7 +1010,8 @@ function App() {
             </>
           )}
           <footer>
-            봇 운용 금액은 USD 기준이며 실제 계좌는 표시된 통화를 따릅니다.{" "}
+            봇 운용 금액은 {currency} 기준입니다. 시장별 예산·손익은 별도로
+            계산합니다.{" "}
             <span>수수료·세금의 확정 여부는 주문 기록에서 확인하세요.</span>
           </footer>
         </div>
@@ -1019,7 +1100,10 @@ function App() {
                           <tr key={level.buy}>
                             <td>{money(level.buy)}</td>
                             <td>{money(level.sell)}</td>
-                            <td>{level.quantity}주</td>
+                            <td>
+                              {level.quantity}
+                              {unit}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1120,7 +1204,8 @@ function App() {
             <Chart data={result.result.curve || []} />
             <p>
               단순 보유 시 평가금액 {money(result.result.buy_hold_equity)} ·
-              종료 보유 {Number(result.result.held_quantity || 0)}주
+              종료 보유 {Number(result.result.held_quantity || 0)}
+              {unit}
             </p>
             {result.result.halted && (
               <div className="banner danger">{result.result.halted}</div>
@@ -1147,6 +1232,91 @@ const optimizerNames: Data = {
   nsga2: "NSGA-II",
 };
 
+function CryptoAccountPanel({ account }: { account: Data }) {
+  const { money } = useMarket();
+  const snapshot = account.snapshot;
+  const ready = account.status === "CONNECTED" && !account.stale;
+  return (
+    <section className="panel account-panel">
+      <div className="section-heading">
+        <h2>업비트 실제 계좌</h2>
+        <span className={`badge ${ready ? "success" : "neutral"}`}>
+          {ready ? "조회 전용 연결" : "조회 확인 필요"}
+        </span>
+      </div>
+      <p>
+        아래 잔액은 실제 계좌이며 봇의 모의 자금과 별도입니다. 주문·입출금은
+        실행하지 않습니다.
+      </p>
+      {account.error && (
+        <p className="banner danger">
+          조회 실패: {account.error} · 마지막 조회 값을 현재 잔액으로 사용하지
+          않습니다.
+        </p>
+      )}
+      {snapshot ? (
+        <>
+          <div className="metrics compact">
+            <Metric
+              label="사용 가능한 원화"
+              value={money(snapshot.cash_available)}
+              sub={ready ? "조회 전용" : "마지막 조회 값 · 갱신 필요"}
+            />
+            <Metric
+              label="주문 등에 묶인 원화"
+              value={money(snapshot.cash_locked)}
+              sub="기존 미체결 주문 등에 배정된 금액"
+            />
+            <Metric
+              label="보유 코인"
+              value={`${snapshot.assets.length}종목`}
+              sub="계좌 평가 합계와 봇 성과는 별도입니다"
+            />
+          </div>
+          <details>
+            <summary>보유 코인 수량 보기</summary>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>코인</th>
+                    <th>사용 가능</th>
+                    <th>주문 등에 묶인 수량</th>
+                    <th>평균 매수가</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {snapshot.assets.map((r: Data) => (
+                    <tr key={r.currency}>
+                      <td>{r.currency}</td>
+                      <td>{r.balance}</td>
+                      <td>{r.locked}</td>
+                      <td>
+                        {Number(r.avg_buy_price).toLocaleString("ko-KR")}{" "}
+                        {r.unit_currency}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+          <p className="fine-print">
+            마지막 성공 조회{" "}
+            {new Date(snapshot.checked_at).toLocaleString("ko-KR")} · 약
+            60초마다 갱신
+          </p>
+        </>
+      ) : (
+        <p>
+          확인된 계좌 정보가 없습니다. 공개 시세를 이용한 연구와 계좌 조회
+          상태는 별도로 표시됩니다.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function AccountPanel({
   account,
   telegram,
@@ -1154,6 +1324,8 @@ function AccountPanel({
   account: Data;
   telegram: Data | undefined;
 }) {
+  const { venue } = useMarket();
+  if (venue === "upbit") return <CryptoAccountPanel account={account} />;
   const snapshot = account.snapshot;
   const ready = account.status === "CONNECTED" && !account.stale;
   const telegramReady =
@@ -1187,7 +1359,7 @@ function AccountPanel({
           <div className="metrics compact">
             <Metric
               label="USD 현금 매수 가능"
-              value={money(snapshot.cash_buying_power.USD)}
+              value={formatMoney(snapshot.cash_buying_power.USD, "toss")}
               sub={
                 account.stale || !ready
                   ? "마지막 조회 값 · 갱신 필요"
@@ -1290,6 +1462,7 @@ function RiskRow({
   amount: string;
   current: number;
 }) {
+  const { money } = useMarket();
   return (
     <div className="risk-row">
       <div>
@@ -1349,11 +1522,13 @@ function StrategyForm({
   onSave: (body: Data) => void;
   onClose: () => void;
 }) {
+  const { venue, currency } = useMarket();
   const [form, setForm] = useState<Data>({
     name: "",
+    venue,
     symbol: "",
     kind: "grid",
-    budget: "1000",
+    budget: marketInfo(venue).budget,
     lower: "",
     upper: "",
     grids: 5,
@@ -1439,11 +1614,15 @@ function StrategyForm({
           저장 후 주문 규모와 설정을 확인하고 실행할 수 있습니다.
         </p>
         <div className="form-grid">
-          {input("symbol", "미국 종목 심볼", {
-            placeholder: "종목 코드 입력",
-            required: true,
-            autoCapitalize: "characters",
-          })}
+          {input(
+            "symbol",
+            venue === "upbit" ? "코인 거래쌍" : "미국 종목 코드",
+            {
+              placeholder: marketInfo(venue).example,
+              required: true,
+              autoCapitalize: "characters",
+            },
+          )}
           {input("name", "전략 이름", { placeholder: "선택 사항" })}
           <label>
             전략
@@ -1456,10 +1635,10 @@ function StrategyForm({
               <option value="rebound">과매도 반등</option>
             </select>
           </label>
-          {input("budget", "배정 예산 · USD", {
+          {input("budget", `배정 예산 · ${currency}`, {
             type: "number",
             min: 1,
-            max: 5000,
+            max: marketInfo(venue).maxBudget,
             step: ".01",
             required: true,
           })}
@@ -1468,13 +1647,13 @@ function StrategyForm({
           <>
             <div className="form-section-title">그리드 가격선</div>
             <div className="form-grid">
-              {input("lower", "하단 가격 · USD", {
+              {input("lower", `하단 가격 · ${currency}`, {
                 type: "number",
                 step: ".0001",
                 min: ".0001",
                 required: true,
               })}
-              {input("upper", "상단 가격 · USD", {
+              {input("upper", `상단 가격 · ${currency}`, {
                 type: "number",
                 step: ".0001",
                 min: ".0001",
@@ -1505,8 +1684,9 @@ function StrategyForm({
               하락 추세에서는 신규 매수 보류
             </label>
             <p className="fine-print">
-              가격선마다 같은 예산을 배정해 1주 단위로 계산합니다. 하단 이탈 시
-              주문을 취소하고 보유분은 유지합니다.
+              가격선마다 같은 예산을 배정합니다. 주식은 최소 1주, 코인은 최소
+              5,000원이며 소수점 수량을 사용합니다. 하단 이탈 시 주문을 취소하고
+              보유분은 유지합니다.
             </p>
           </>
         )}
@@ -1575,7 +1755,9 @@ function Research({
   act,
   onResult,
   onAdopt,
+  commands,
 }: {
+  commands: Data[];
   busy: boolean;
   datasets: Data[];
   strategies: Data[];
@@ -1585,9 +1767,14 @@ function Research({
   onResult: (id: string) => Promise<void>;
   onAdopt: (spec: Data) => void;
 }) {
+  const { money, venue, currency } = useMarket();
   const [strategyId, setStrategyId] = useState(selected?.id || "");
-  const [symbol, setSymbol] = useState("");
-  const [budget, setBudget] = useState("1000");
+  const [symbol, setSymbol] = useState(
+    (new URLSearchParams(window.location.search).get("venue") === venue
+      ? new URLSearchParams(window.location.search).get("symbol")
+      : "") || marketInfo(venue).example,
+  );
+  const [budget, setBudget] = useState(marketInfo(venue).budget);
   const [method, setMethod] = useState("exhaustive");
   const [searchSpace, setSearchSpace] = useState("compact");
   const [trials, setTrials] = useState("100");
@@ -1597,7 +1784,11 @@ function Research({
   const [slippage, setSlippage] = useState("10");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [fileSymbol, setFileSymbol] = useState("");
+  const [fileSymbol, setFileSymbol] = useState(
+    (new URLSearchParams(window.location.search).get("venue") === venue
+      ? new URLSearchParams(window.location.search).get("symbol")
+      : "") || marketInfo(venue).example,
+  );
   const [filename, setFilename] = useState("");
   const strategy = strategies.find((s) => s.id === strategyId);
   const run = (action: "backtest" | "suggest") =>
@@ -1622,6 +1813,7 @@ function Research({
           action === "backtest"
             ? strategy!.config
             : {
+                venue,
                 symbol: ticker,
                 kind: "trend",
                 budget,
@@ -1672,6 +1864,7 @@ function Research({
         });
       }
       await api("/datasets/import", {
+        venue,
         symbol: fileSymbol.trim().toUpperCase(),
         source: "user",
         candles,
@@ -1680,6 +1873,122 @@ function Research({
     });
   return (
     <>
+      <section className="panel">
+        <div className="section-heading">
+          <h2>시장 데이터</h2>
+          <span className="badge neutral">수정하지 않은 가격</span>
+        </div>
+        <div className="data-tools">
+          <label>
+            종목
+            <input
+              value={fileSymbol}
+              onChange={(e) => setFileSymbol(e.target.value)}
+              placeholder={marketInfo(venue).example}
+            />
+          </label>
+          <label>
+            수집 시작일
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
+          </label>
+          <button
+            className="outline"
+            onClick={() =>
+              act(async () => {
+                if (!fileSymbol || !from)
+                  throw new Error("종목과 시작일을 입력하세요.");
+                await api("/commands", {
+                  id: crypto.randomUUID(),
+                  action: "ingest",
+                  payload: {
+                    venue,
+                    symbol: fileSymbol.toUpperCase(),
+                    from: `${from}T00:00:00Z`,
+                    interval: "1m",
+                  },
+                });
+              })
+            }
+          >
+            {venue === "upbit" ? "업비트" : "토스"}에서 수집 요청
+          </button>
+          <label className="outline file-button">
+            CSV·JSON 가져오기
+            <input
+              type="file"
+              accept=".csv,.json"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) importFile(file);
+              }}
+            />
+          </label>
+        </div>
+        <div className="ingest-status" aria-live="polite">
+          {commands
+            .filter(
+              (c) =>
+                c.action === "ingest" && (c.payload.venue || "toss") === venue,
+            )
+            .slice(0, 3)
+            .map((c) => (
+              <p key={c.id}>
+                <strong>
+                  {c.payload.symbol} · {labels[c.status] || c.status}
+                </strong>{" "}
+                · {c.result.count || 0}봉 수집{" "}
+                {c.result.message && `· ${c.result.message}`}
+              </p>
+            ))}
+        </div>
+        <p className="fine-print">
+          CSV 헤더: timestamp,open,high,low,close,volume · 시각은 시간대가
+          포함된 ISO 8601 형식 · 한 번에 최대 20,000봉
+          {filename && ` · ${filename}`}
+        </p>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>종목</th>
+                <th>출처</th>
+                <th>봉 수</th>
+                <th>시작</th>
+                <th>종료</th>
+              </tr>
+            </thead>
+            <tbody>
+              {datasets.map((d, i) => (
+                <tr key={i}>
+                  <td>
+                    <strong>{d.symbol}</strong> · {d.interval}
+                  </td>
+                  <td>
+                    {d.source === "synthetic"
+                      ? "가상 예제"
+                      : d.source === "toss"
+                        ? "토스증권"
+                        : "사용자 파일"}
+                  </td>
+                  <td>{d.count.toLocaleString()}</td>
+                  <td>{when(d.first)}</td>
+                  <td>{when(d.last)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!datasets.length && (
+            <Empty
+              title="아직 저장된 시세가 없습니다"
+              text="위에서 시세 수집을 요청하거나, 사용 권한이 있는 시세 파일을 가져오세요."
+            />
+          )}
+        </div>
+      </section>
       <div className="two-columns">
         <section className="panel">
           <div className="section-heading">
@@ -1733,14 +2042,14 @@ function Research({
         </section>
         <section className="panel">
           <div className="section-heading">
-            <h2>수익 최대 설정 찾기</h2>
+            <h2>그리드 설정 찾기</h2>
             <span className="badge neutral">
               그리드 · {searchSpace === "compact" ? "168" : "756"}개 조합
             </span>
           </div>
           <div className="form-grid">
             <label>
-              미국 종목 심볼
+              {venue === "upbit" ? "코인 거래쌍" : "미국 종목 코드"}
               <input
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
@@ -1748,11 +2057,11 @@ function Research({
               />
             </label>
             <label>
-              배정 예산 · USD
+              배정 예산 · {currency}
               <input
                 type="number"
                 min="1"
-                max="5000"
+                max={marketInfo(venue).maxBudget}
                 value={budget}
                 onChange={(e) => setBudget(e.target.value)}
               />
@@ -1865,108 +2174,10 @@ function Research({
             disabled={busy}
             onClick={() => run("suggest")}
           >
-            수익 최대 설정 탐색
+            그리드 설정 탐색
           </button>
         </section>
       </div>
-      <section className="panel">
-        <div className="section-heading">
-          <h2>시장 데이터</h2>
-          <span className="badge neutral">수정하지 않은 가격</span>
-        </div>
-        <div className="data-tools">
-          <label>
-            종목
-            <input
-              value={fileSymbol}
-              onChange={(e) => setFileSymbol(e.target.value)}
-              placeholder="미국 종목 심볼"
-            />
-          </label>
-          <label>
-            수집 시작일
-            <input
-              type="date"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-            />
-          </label>
-          <button
-            className="outline"
-            onClick={() =>
-              act(async () => {
-                if (!fileSymbol || !from)
-                  throw new Error("종목과 시작일을 입력하세요.");
-                await api("/commands", {
-                  id: crypto.randomUUID(),
-                  action: "ingest",
-                  payload: {
-                    symbol: fileSymbol.toUpperCase(),
-                    from,
-                    interval: "1m",
-                  },
-                });
-              })
-            }
-          >
-            토스에서 수집 요청
-          </button>
-          <label className="outline file-button">
-            CSV·JSON 가져오기
-            <input
-              type="file"
-              accept=".csv,.json"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) importFile(file);
-              }}
-            />
-          </label>
-        </div>
-        <p className="fine-print">
-          CSV 헤더: timestamp,open,high,low,close,volume · 시각은 시간대가
-          포함된 ISO 8601 형식 · 한 번에 최대 20,000봉
-          {filename && ` · ${filename}`}
-        </p>
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>종목</th>
-                <th>출처</th>
-                <th>봉 수</th>
-                <th>시작</th>
-                <th>종료</th>
-              </tr>
-            </thead>
-            <tbody>
-              {datasets.map((d, i) => (
-                <tr key={i}>
-                  <td>
-                    <strong>{d.symbol}</strong> · {d.interval}
-                  </td>
-                  <td>
-                    {d.source === "synthetic"
-                      ? "가상 예제"
-                      : d.source === "toss"
-                        ? "토스증권"
-                        : "사용자 파일"}
-                  </td>
-                  <td>{d.count.toLocaleString()}</td>
-                  <td>{when(d.first)}</td>
-                  <td>{when(d.last)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!datasets.length && (
-            <Empty
-              title="아직 저장된 시세가 없습니다"
-              text="토스 연결 후 수집을 요청하거나, 사용 권한이 있는 시세 파일을 가져오세요."
-            />
-          )}
-        </div>
-      </section>
       <section className="panel">
         <div className="section-heading">
           <h2>검증 기록</h2>
@@ -2095,6 +2306,7 @@ function OptimizationResult({
   result: Data;
   onAdopt: (spec: Data) => void;
 }) {
+  const { money, unit } = useMarket();
   const selected = result.candidates.find(
     (c: Data) => c.id === result.selected_id,
   );
@@ -2102,8 +2314,8 @@ function OptimizationResult({
   return (
     <div className="optimization-result">
       <p className="search-summary">
-        <strong>{result.tested_count}개 설정 비교 완료</strong> · 예산·최소
-        1주·왕복 비용 조건으로 {result.invalid_count}개 제외
+        <strong>{result.tested_count}개 설정 비교 완료</strong> · 예산·최소 최소
+        주문·왕복 비용 조건으로 {result.invalid_count}개 제외
       </p>
       {result.searches && (
         <>
@@ -2194,8 +2406,8 @@ function OptimizationResult({
           {result.holdout.completed_cycles}회
         </p>
         <p>
-          종료 보유 {Number(result.holdout.held_quantity)}주 · 평가손익{" "}
-          {money(result.holdout.unrealized)} · 단순 보유 손익{" "}
+          종료 보유 {Number(result.holdout.held_quantity)}
+          {unit} · 평가손익 {money(result.holdout.unrealized)} · 단순 보유 손익{" "}
           {money(
             Number(result.holdout.buy_hold_equity) -
               Number(selected.spec.budget),
@@ -2307,4 +2519,6 @@ function OptimizationResult({
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  window.location.pathname === "/guide" ? <Guide /> : <TradingApp />,
+);

@@ -120,7 +120,7 @@ async def test_late_fill_is_reconciled_even_after_risk_halt(db):
     async with engine.sessions.begin() as session:
         intent = await session.get(Intent, intent_id)
         intent.status, intent.broker_id = "PENDING_CANCEL", "fixture-order"
-        (await session.get(AccountState, "live")).halted = True
+        (await session.get(AccountState, {"venue": "toss", "mode": "live"})).halted = True
         (await session.get(Strategy, strategy_id)).status = "PAUSED"
     engine.broker.order.return_value = {
         "symbol": "TEST",
