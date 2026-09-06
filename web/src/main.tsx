@@ -227,6 +227,7 @@ function App({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showForm, setShowForm] = useState(false);
+  const [inventoryAsset, setInventoryAsset] = useState<Data | null>(null);
   const [selected, setSelected] = useState<Data | null>(null);
   const [confirm, setConfirm] = useState<Data | null>(null);
   const [result, setResult] = useState<Data | null>(null);
@@ -587,7 +588,11 @@ function App({
           )}
           {tab === "overview" && (
             <>
-              <AccountPanel account={account} telegram={status.telegram} />
+              <AccountPanel
+                account={account}
+                telegram={status.telegram}
+                onInventory={setInventoryAsset}
+              />
               <div className="metrics">
                 <Metric
                   label="운용 평가금액"
@@ -788,7 +793,11 @@ function App({
                       </div>
                       <div className="strategy-summary">
                         <div>
-                          <small>배정 예산</small>
+                          <small>
+                            {Number(s.config.inventory_quantity) > 0
+                              ? "배정 평가금액"
+                              : "배정 예산"}
+                          </small>
                           <strong>{money(s.config.budget)}</strong>
                         </div>
                         <div>
@@ -814,6 +823,13 @@ function App({
                         </div>
                       )}
                       <p className="strategy-reason">{s.reason}</p>
+                      {Number(s.config.inventory_quantity) > 0 && (
+                        <p className="banner">
+                          보유 {s.config.inventory_quantity}
+                          {unit}로 매도부터 시작 · 추가 원화 0원. 각 단계의
+                          매도대금으로 재매수한 뒤 같은 매도가에서 반복합니다.
+                        </p>
+                      )}
                       {s.status !== "RUNNING" &&
                         Number(s.state.quantity) === 0 && (
                           <button
@@ -866,6 +882,12 @@ function App({
                         )}
                         <button
                           className="outline"
+                          disabled={Number(s.config.inventory_quantity) > 0}
+                          title={
+                            Number(s.config.inventory_quantity) > 0
+                              ? "계좌 편입 초안은 과거 백테스트 대상이 아닙니다"
+                              : undefined
+                          }
                           onClick={() => {
                             setSelected(s);
                             setTab("research");
@@ -1092,6 +1114,28 @@ function App({
           </footer>
         </div>
       </main>
+      {inventoryAsset && (
+        <InventoryForm
+          asset={inventoryAsset}
+          busy={busy}
+          onClose={() => setInventoryAsset(null)}
+          onPrepare={(payload) =>
+            act(async () => {
+              await api("/commands", {
+                id: crypto.randomUUID(),
+                action: "prepare_inventory",
+                payload,
+              });
+              setInventoryAsset(null);
+              setMode("live");
+              setTab("strategies");
+              setNotice(
+                "계좌와 단계별 주문 가능 여부를 확인 중입니다. 완료되면 실거래 초안이 나타납니다. 실패 사유는 주문과 기록에서 확인하세요.",
+              );
+            })
+          }
+        />
+      )}
       {showForm && (
         <StrategyForm
           mode={mode}
@@ -1154,6 +1198,32 @@ function App({
                   예산 {money(confirm.strategy.config.budget)} · 설정 버전{" "}
                   {confirm.strategy.version}
                 </p>
+                {Number(confirm.strategy.config.inventory_quantity) > 0 && (
+                  <div className="banner inventory-confirm">
+                    <strong>
+                      보유 {confirm.strategy.config.inventory_quantity}
+                      {unit} 전량을 이 전략에 편입합니다.
+                    </strong>
+                    <p>
+                      추가 원화는 0원입니다. 아래 매도가에서 먼저 팔고, 그
+                      단계의 매도대금으로 아래 매수가에서 재매수합니다. 수량은
+                      단계별 최대 보유 수량이며 이익은 원화로 남습니다.
+                    </p>
+                    <p>
+                      평가 기준가{" "}
+                      {money(confirm.strategy.config.inventory_reference_price)}{" "}
+                      · 계좌 평균 매수가{" "}
+                      {money(confirm.strategy.config.inventory_average_price)}.
+                      운용 손익은 평가 기준가부터 계산하며 기존 보유 손익과
+                      별도입니다.
+                    </p>
+                    <p>
+                      가격에 도달할 때 종목당 한 주문씩 처리합니다. 가격 범위
+                      아래에서도 매수·대기를 이어가며, 하루 손실·고점 대비 손실
+                      한도에 도달하면 주문을 중단하고 보유분을 유지합니다.
+                    </p>
+                  </div>
+                )}
                 {confirm.strategy.config.kind === "grid" && (
                   <p>
                     {money(confirm.strategy.config.lower)} ~{" "}
@@ -1177,7 +1247,10 @@ function App({
                             <td>{money(level.buy)}</td>
                             <td>{money(level.sell)}</td>
                             <td>
-                              {level.quantity}
+                              {String(level.quantity).replace(
+                                /(\.\d*?[1-9])0+$|\.0+$/,
+                                "$1",
+                              )}
                               {unit}
                             </td>
                           </tr>
@@ -1186,22 +1259,26 @@ function App({
                     </table>
                   </div>
                 )}
-                <p>
-                  {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
-                  {confirm.strategy.config.fast}/{confirm.strategy.config.slow}{" "}
-                  · RSI {confirm.strategy.config.rsi_period}
-                </p>
-                {confirm.strategy.config.kind === "grid" && (
+                {!Number(confirm.strategy.config.inventory_quantity) && (
                   <p>
-                    {confirm.strategy.config.spacing === "geometric"
-                      ? "동일 비율"
-                      : "동일 금액"}{" "}
-                    간격 · 하락 시 매수 보류{" "}
-                    {confirm.strategy.config.signal_gate
-                      ? "사용"
-                      : "사용 안 함"}
+                    {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
+                    {confirm.strategy.config.fast}/
+                    {confirm.strategy.config.slow} · RSI{" "}
+                    {confirm.strategy.config.rsi_period}
                   </p>
                 )}
+                {confirm.strategy.config.kind === "grid" &&
+                  !Number(confirm.strategy.config.inventory_quantity) && (
+                    <p>
+                      {confirm.strategy.config.spacing === "geometric"
+                        ? "동일 비율"
+                        : "동일 금액"}{" "}
+                      간격 · 하락 시 매수 보류{" "}
+                      {confirm.strategy.config.signal_gate
+                        ? "사용"
+                        : "사용 안 함"}
+                    </p>
+                  )}
                 {confirm.strategy.config.kind === "rebound" && (
                   <p>
                     RSI 진입 {confirm.strategy.config.rsi_entry} · 매도{" "}
@@ -1315,7 +1392,13 @@ const optimizerNames: Data = {
   nsga2: "NSGA-II",
 };
 
-function CryptoAccountPanel({ account }: { account: Data }) {
+function CryptoAccountPanel({
+  account,
+  onInventory,
+}: {
+  account: Data;
+  onInventory: (asset: Data) => void;
+}) {
   const { money } = useMarket();
   const snapshot = account.snapshot;
   const ready = account.status === "CONNECTED" && !account.stale;
@@ -1347,7 +1430,7 @@ function CryptoAccountPanel({ account }: { account: Data }) {
             <Metric
               label="사용 가능한 원화"
               value={money(snapshot.cash_available)}
-              sub={ready ? "조회 전용" : "마지막 조회 값 · 갱신 필요"}
+              sub={ready ? "계좌 사용 가능 잔액" : "마지막 조회 값 · 갱신 필요"}
             />
             <Metric
               label="주문 등에 묶인 원화"
@@ -1360,7 +1443,7 @@ function CryptoAccountPanel({ account }: { account: Data }) {
               sub="계좌 평가 합계와 봇 성과는 별도입니다"
             />
           </div>
-          <details>
+          <details open>
             <summary>보유 코인 수량 보기</summary>
             <div className="table-scroll">
               <table>
@@ -1388,6 +1471,22 @@ function CryptoAccountPanel({ account }: { account: Data }) {
               </table>
             </div>
           </details>
+          <div className="card-actions">
+            {snapshot.assets
+              .filter(
+                (r: Data) => Number(r.balance) > 0 && r.unit_currency === "KRW",
+              )
+              .map((r: Data) => (
+                <button
+                  key={r.currency}
+                  className="outline"
+                  disabled={!ready || Number(r.locked) !== 0}
+                  onClick={() => onInventory(r)}
+                >
+                  {r.currency} 전량 반복 그리드 준비
+                </button>
+              ))}
+          </div>
           <p className="fine-print">
             마지막 성공 조회{" "}
             {new Date(snapshot.checked_at).toLocaleString("ko-KR")} · 약
@@ -1407,12 +1506,15 @@ function CryptoAccountPanel({ account }: { account: Data }) {
 function AccountPanel({
   account,
   telegram,
+  onInventory,
 }: {
   account: Data;
   telegram: Data | undefined;
+  onInventory: (asset: Data) => void;
 }) {
   const { venue } = useMarket();
-  if (venue === "upbit") return <CryptoAccountPanel account={account} />;
+  if (venue === "upbit")
+    return <CryptoAccountPanel account={account} onInventory={onInventory} />;
   const snapshot = account.snapshot;
   const ready = account.status === "CONNECTED" && !account.stale;
   const telegramReady =
@@ -1592,6 +1694,125 @@ function Empty({
           <Icon name="arrow" />
         </button>
       )}
+    </div>
+  );
+}
+
+function InventoryForm({
+  asset,
+  busy,
+  onClose,
+  onPrepare,
+}: {
+  asset: Data;
+  busy: boolean;
+  onClose: () => void;
+  onPrepare: (payload: Data) => void;
+}) {
+  const [basis, setBasis] = useState("average");
+  const [grids, setGrids] = useState(5);
+  const [step, setStep] = useState("2");
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal form-modal inventory-form"
+        role="dialog"
+        aria-modal="true"
+        aria-label="보유 전량 반복 그리드 준비"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          onPrepare({
+            symbol: `KRW-${asset.currency}`,
+            allocation: "all",
+            first_sell_basis: basis,
+            grids,
+            step_percent: step,
+          });
+        }}
+      >
+        <div className="section-heading">
+          <h2>보유 {asset.currency}로 반복 그리드</h2>
+          <button
+            type="button"
+            className="close"
+            onClick={onClose}
+            aria-label="닫기"
+          >
+            ×
+          </button>
+        </div>
+        <p>
+          <strong>
+            현재 조회 수량 {asset.balance} {asset.currency} 전량
+          </strong>
+          을 사용합니다. 준비 시 최신 잔고를 다시 조회하며, 실제 수량과 가격표는
+          시작 전에 확인합니다.
+        </p>
+        <p>
+          먼저 매도 → 한 단계 아래에서 같은 수량 재매수 → 원래 매도가에서
+          재매도합니다. 각 단계의 매도대금 안에서 반복하고 이익은 원화로
+          남깁니다.
+        </p>
+        <label>
+          첫 매도 기준
+          <select value={basis} onChange={(e) => setBasis(e.target.value)}>
+            <option value="average">평균 매수가와 수수료 이상</option>
+            <option value="market">현재가 한 단계 위</option>
+          </select>
+        </label>
+        <p className="fine-print">
+          {basis === "average"
+            ? "현재가 한 단계 위와 평균 매수가에 비용을 더한 가격 중 높은 쪽에서 시작합니다."
+            : "현재가 기준으로 시작하면 첫 매도에서 기존 보유 손실이 확정될 수 있습니다."}
+        </p>
+        <details>
+          <summary>단계 수와 간격 조정</summary>
+          <div className="form-grid">
+            <label>
+              단계 수
+              <input
+                type="number"
+                min={2}
+                max={30}
+                required
+                value={grids}
+                onChange={(e) => setGrids(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              단계 간격 · %
+              <input
+                type="number"
+                min="0.5"
+                max="10"
+                step="0.1"
+                required
+                value={step}
+                onChange={(e) => setStep(e.target.value)}
+              />
+            </label>
+          </div>
+        </details>
+        <p className="fine-print">
+          5단계·2%는 사용자가 조정할 수 있는 시작 예시이며 최적화 결과가
+          아닙니다. 주문별 최소 금액·수수료·호가 단위를 확인합니다. 추가 원화는
+          필요하지 않습니다.
+        </p>
+        <p className="fine-print">
+          초안은 주문을 시작하지 않습니다. 시작 후에는 가격이 도달할 때 한
+          주문씩 처리하고, 계좌 수량이 달라지거나 손실 한도에 도달하면
+          중단합니다.
+        </p>
+        <div className="card-actions">
+          <button type="button" className="outline" onClick={onClose}>
+            돌아가기
+          </button>
+          <button className="primary" disabled={busy}>
+            {busy ? "요청 중…" : "최신 잔고로 초안 준비"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
