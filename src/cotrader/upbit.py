@@ -1,4 +1,4 @@
-"""Upbit public KRW market data and authenticated account reads; no order transport."""
+"""Upbit KRW quotes, account reads and explicitly enabled limit orders."""
 
 import asyncio
 import base64
@@ -7,13 +7,14 @@ import hmac
 import json
 import time
 from datetime import UTC, datetime
+from urllib.parse import unquote, urlencode
 from uuid import uuid4
 
 import httpx
 
 from cotrader.broker import BrokerError
 from cotrader.domain import D, Quote
-from cotrader.markets import validate_symbol
+from cotrader.markets import order_size_valid, price_tick, round_quantity, validate_symbol
 
 
 def market_eligible(market):
@@ -27,15 +28,15 @@ def market_eligible(market):
     )
 
 
-def account_jwt(access_key: str, secret_key: str) -> str:
+def account_jwt(access_key: str, secret_key: str, params=None) -> str:
     def encode(value):
         return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).rstrip(b"=")
 
-    unsigned = (
-        encode({"alg": "HS512", "typ": "JWT"})
-        + b"."
-        + encode({"access_key": access_key, "nonce": str(uuid4())})
-    )
+    payload = {"access_key": access_key, "nonce": str(uuid4())}
+    if params:
+        query = unquote(urlencode(params, doseq=True))
+        payload.update(query_hash=hashlib.sha512(query.encode()).hexdigest(), query_hash_alg="SHA512")
+    unsigned = encode({"alg": "HS512", "typ": "JWT"}) + b"." + encode(payload)
     signature = hmac.new(secret_key.encode(), unsigned, hashlib.sha512).digest()
     return (unsigned + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
 
@@ -50,10 +51,21 @@ class UpbitBroker:
     async def close(self):
         await self.client.aclose()
 
-    async def request(self, method, path, *, params=None, private=False):
-        if method != "GET":
+    async def request(self, method, path, *, params=None, body=None, private=False):
+        testing = method == "POST" and path == "/v1/orders/test" and private
+        mutation = method != "GET" and not testing
+        if mutation and not self.settings.upbit_live_enabled:
             raise BrokerError("upbit-read-only")
-        if private and path != "/v1/accounts":
+        allowed = {
+            ("GET", "/v1/accounts"),
+            ("GET", "/v1/orders/chance"),
+            ("GET", "/v1/orders/open"),
+            ("GET", "/v1/order"),
+            ("POST", "/v1/orders"),
+            ("POST", "/v1/orders/test"),
+            ("DELETE", "/v1/order"),
+        }
+        if private and (method, path) not in allowed or not private and method != "GET":
             raise BrokerError("upbit-private-endpoint-disabled")
         headers = {}
         if private:
@@ -61,20 +73,93 @@ class UpbitBroker:
             secret = self.settings.upbit_secret_key.get_secret_value()
             if not access or not secret:
                 raise BrokerError("upbit-credentials-missing")
-            headers["Authorization"] = "Bearer " + account_jwt(access, secret)
+            headers["Authorization"] = "Bearer " + account_jwt(access, secret, body if body else params)
         async with self.lock:
             await asyncio.sleep(max(0, self.next_request - time.monotonic()))
             self.next_request = time.monotonic() + 0.2
             try:
-                response = await self.client.get(path, params=params, headers=headers)
+                response = await self.client.request(method, path, params=params, json=body, headers=headers)
                 if response.status_code in {418, 429}:
                     self.next_request = time.monotonic() + 60
-                    raise BrokerError("upbit-rate-limited")
-                if response.status_code != 200:
-                    raise BrokerError(f"upbit-http-{response.status_code}")
+                    raise BrokerError("upbit-rate-limited", ambiguous=mutation)
+                if not response.is_success:
+                    # Only provider error codes, never bodies, keys or account values in logs.
+                    code = response.json().get("error", {}).get("name", "")
+                    code = code if isinstance(code, str) and code.replace("_", "").isalnum() else "error"
+                    raise BrokerError(f"upbit-{code}", ambiguous=mutation and response.status_code >= 500)
                 return response.json()
             except (httpx.HTTPError, ValueError):
-                raise BrokerError("upbit-unavailable") from None
+                raise BrokerError("upbit-unavailable", ambiguous=mutation) from None
+
+    async def chance(self, symbol):
+        validate_symbol("upbit", symbol)
+        return await self.request("GET", "/v1/orders/chance", params={"market": symbol}, private=True)
+
+    async def orders(self, symbol=None):
+        rows, seen = [], set()
+        for page in range(1, 101):
+            params = {"states[]": ["wait", "watch"], "page": page, "limit": 100, "order_by": "asc"}
+            if symbol:
+                validate_symbol("upbit", symbol)
+                params["market"] = symbol
+            batch = await self.request("GET", "/v1/orders/open", params=params, private=True)
+            if not isinstance(batch, list):
+                raise BrokerError("upbit-invalid-orders")
+            for row in batch:
+                if row["uuid"] in seen:
+                    raise BrokerError("upbit-order-pagination-changed")
+                seen.add(row["uuid"])
+                rows.append(
+                    {"orderId": row["uuid"], "symbol": row["market"], "identifier": row.get("identifier")}
+                )
+            if len(batch) < 100:
+                return rows
+        raise BrokerError("upbit-order-history-too-large")
+
+    async def order(self, order_id=None, *, identifier=None):
+        if bool(order_id) == bool(identifier):
+            raise ValueError("주문 UUID 또는 식별자 중 하나가 필요합니다")
+        raw = await self.request(
+            "GET",
+            "/v1/order",
+            private=True,
+            params={"uuid": order_id} if order_id else {"identifier": identifier},
+        )
+        return normalize_order(raw)
+
+    def order_body(self, intent):
+        validate_symbol("upbit", intent.symbol)
+        if (
+            intent.venue != "upbit"
+            or intent.side not in {"BUY", "SELL"}
+            or not order_size_valid(intent.quantity, intent.price, "upbit")
+            or intent.quantity != round_quantity(intent.quantity, "upbit")
+            or intent.price != price_tick(intent.price, "upbit")
+        ):
+            raise ValueError("업비트 지정가 주문의 시장·방향·수량·호가 단위를 확인하세요")
+        return {
+            "market": intent.symbol,
+            "side": "bid" if intent.side == "BUY" else "ask",
+            "volume": format(intent.quantity.normalize(), "f"),
+            "price": format(intent.price.normalize(), "f"),
+            "ord_type": "limit",
+            "identifier": intent.id,
+            "smp_type": "cancel_taker",
+        }
+
+    async def test_order(self, intent):
+        await self.request("POST", "/v1/orders/test", body=self.order_body(intent), private=True)
+        # A test UUID is never persisted as an actual order.
+        return {"validated": True, "actual_order_created": False}
+
+    async def place(self, intent):
+        raw = await self.request("POST", "/v1/orders", body=self.order_body(intent), private=True)
+        if not isinstance(raw, dict) or not raw.get("uuid") or raw.get("identifier") != intent.id:
+            raise BrokerError("upbit-invalid-submission", ambiguous=True)
+        return {"orderId": raw["uuid"]}
+
+    async def cancel(self, order_id):
+        return await self.request("DELETE", "/v1/order", params={"uuid": order_id}, private=True)
 
     async def markets(self):
         rows = await self.request("GET", "/v1/market/all", params={"is_details": "true"})
@@ -150,3 +235,47 @@ class UpbitBroker:
             "assets": [r for r in assets if r["currency"] != "KRW"],
             "checked_at": datetime.now(UTC).isoformat(),
         }
+
+
+def normalize_order(raw):
+    """Normalize only complete REST execution evidence; never infer fill amount from limit price."""
+    try:
+        quantity, filled, fee = D(raw["volume"]), D(raw["executed_volume"]), D(raw["paid_fee"])
+        trades = raw.get("trades", [])
+        trade_quantity = sum((D(t["volume"]) for t in trades), D(0))
+        amount = sum((D(t["funds"]) for t in trades), D(0))
+        if (
+            any(not n.is_finite() or n < 0 for n in (quantity, filled, fee, amount))
+            or quantity <= 0
+            or filled > quantity
+            or trade_quantity != filled
+            or filled > 0
+            and amount <= 0
+        ):
+            raise ValueError("incomplete-execution")
+        status = {
+            "wait": "PARTIAL_FILLED" if filled else "PENDING",
+            "watch": "PENDING",
+            "done": "FILLED",
+            "cancel": "CANCELED",
+            "prevented": "CANCELED",
+        }[raw["state"]]
+        if status == "FILLED" and filled != quantity:
+            raise ValueError("incomplete-terminal-order")
+        return {
+            "orderId": raw["uuid"],
+            "clientOrderId": raw.get("identifier"),
+            "symbol": raw["market"],
+            "side": {"bid": "BUY", "ask": "SELL"}[raw["side"]],
+            "quantity": str(quantity),
+            "price": raw["price"],
+            "status": status,
+            "execution": {
+                "filledQuantity": str(filled),
+                "filledAmount": str(amount),
+                "commission": str(fee),
+                "tax": "0",
+            },
+        }
+    except (ValueError, KeyError, TypeError, ArithmeticError):
+        raise BrokerError("upbit-invalid-order-evidence") from None

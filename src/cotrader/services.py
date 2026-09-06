@@ -17,7 +17,7 @@ def approval_digest(strategy, settings) -> str:
         strategy.config,
         str(settings.capital_for(strategy.venue)),
         settings.risk_for(strategy.venue),
-        settings.live_enabled,
+        settings.live_for(strategy.venue),
         "ALL_SESSIONS_HOLD_ON_STOP",
     ]
     return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[:16]
@@ -47,8 +47,6 @@ async def bootstrap(session, settings):
 async def create_strategy(session, name: str, spec: StrategySpec, mode: str):
     if mode not in {"paper", "live"}:
         raise ValueError("지원하지 않는 실행 모드입니다")
-    if spec.venue == "upbit" and mode == "live":
-        raise ValueError("업비트는 현재 연구·모의매매·계좌 조회를 지원합니다. 실제 주문은 지원하지 않습니다")
     if len(name) > 100 or not name.strip():
         raise ValueError("전략 이름은 1~100자로 입력하세요")
     row = Strategy(
@@ -70,7 +68,16 @@ async def enqueue(session, command_id: str, action: str, payload: dict, actor: s
         if (existing.action, existing.payload, existing.actor) != (action, payload, actor):
             raise ValueError("동일 명령 ID의 내용이 다릅니다")
         return existing
-    if action not in {"start", "pause", "pause_all", "reset_risk", "ingest", "resolve", "archive"}:
+    if action not in {
+        "start",
+        "pause",
+        "pause_all",
+        "reset_risk",
+        "ingest",
+        "resolve",
+        "archive",
+        "check_live",
+    }:
         raise ValueError("지원하지 않는 명령입니다")
     command = Command(id=command_id, action=action, payload=payload, actor=actor)
     session.add(command)
@@ -78,7 +85,7 @@ async def enqueue(session, command_id: str, action: str, payload: dict, actor: s
     return command
 
 
-async def process_command(session, command, settings):
+async def process_command(session, command, settings, *, live_checked=False):
     payload = command.payload
     if command.action not in {"pause", "pause_all"} and now() - command.created_at > timedelta(minutes=5):
         raise ValueError("명령이 5분 이상 지연되었습니다. 현재 상태를 확인하고 다시 요청하세요")
@@ -91,10 +98,12 @@ async def process_command(session, command, settings):
         if row.status == "ARCHIVED":
             raise ValueError("종료된 전략은 재개할 수 없습니다. 새 초안을 만드세요")
         spec = StrategySpec.model_validate(row.config)
-        if spec.venue == "upbit" and (row.mode == "live" or not settings.upbit_enabled):
-            raise ValueError("업비트 실제 주문은 비활성이며 모의매매에는 업비트 시세 연결이 필요합니다")
-        if row.mode == "live" and not settings.live_enabled:
+        if spec.venue == "upbit" and not settings.upbit_enabled:
+            raise ValueError("업비트 시세 연결이 필요합니다")
+        if row.mode == "live" and not settings.live_for(row.venue):
             raise ValueError("서버에서 실거래 실행을 허용하지 않았습니다")
+        if row.mode == "live" and not live_checked:
+            raise ValueError("실거래 시작 전 최신 계좌·주문 가능 여부 점검이 필요합니다")
         account = await session.get(AccountState, {"mode": row.mode, "venue": row.venue})
         if account.halted:
             raise ValueError("포트폴리오가 위험 중단 상태입니다. 기준 재설정 승인이 필요합니다")
@@ -216,6 +225,8 @@ async def process_command(session, command, settings):
         # Resolution needs broker readback and is performed by the engine.
         command.status = "RUNNING"
         return
+    elif command.action == "check_live":
+        raise ValueError("실거래 준비 점검은 엔진의 계좌 확인이 필요합니다")
     command.status, command.result = "SUCCEEDED", {"message": "반영했습니다"}
 
 
@@ -234,6 +245,8 @@ async def record_execution(session, intent: Intent, order: dict):
     if quantity > intent.quantity:
         raise ValueError("주문 수량을 초과한 체결 응답입니다")
     amount = D(execution["filledAmount"] or "0")
+    if not quantity.is_finite() or quantity < 0 or not amount.is_finite() or amount < 0:
+        raise ValueError("체결 수량·금액이 유효하지 않습니다")
     if quantity and not execution.get("filledAmount"):
         raise ValueError("체결 금액이 없는 응답입니다")
     row = await session.get(Strategy, intent.strategy_id)
@@ -241,6 +254,8 @@ async def record_execution(session, intent: Intent, order: dict):
     costs = D(execution.get("commission") or str(amount * D(row.config["commission_rate"]))) + D(
         execution.get("tax") or "0"
     )
+    if not costs.is_finite() or costs < 0:
+        raise ValueError("체결 비용이 유효하지 않습니다")
     if intent.costs_final and quantity == intent.filled_quantity and not final:
         costs, final = intent.costs, True
     fingerprint = hashlib.sha256(

@@ -55,7 +55,7 @@ async def setup_engine(db):
             {"strategy_id": strategy.id, "version": 1, "approval": approval_digest(strategy, settings)},
             "telegram:7",
         )
-        await process_command(session, command, settings)
+        await process_command(session, command, settings, live_checked=True)
         intent = Intent(
             strategy_id=strategy.id,
             symbol="TEST",

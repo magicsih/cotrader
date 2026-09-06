@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     public_url: str = "http://127.0.0.1:8000"
     market_source: Literal["offline", "toss"] = "offline"
     live_enabled: bool = False
+    upbit_live_enabled: bool = False
     account_reads_enabled: bool = False
     telegram_enabled: bool = False
     upbit_enabled: bool = False
@@ -44,6 +45,9 @@ class Settings(BaseSettings):
     discovery_collection_seconds: int = Field(default=1800, ge=60, le=7200)
     discovery_compute_seconds: int = Field(default=1200, ge=30, le=3600)
     static_dir: str = "web/dist"
+
+    def live_for(self, venue):
+        return self.upbit_live_enabled if venue == "upbit" else self.live_enabled
 
     def capital_for(self, venue):
         return self.capital_krw if venue == "upbit" else self.capital_usd
@@ -87,4 +91,6 @@ class Settings(BaseSettings):
                 raise ValueError("외부 인증에는 경로 없는 HTTPS 주소와 32자 이상의 세션 서명이 필요합니다")
         if self.live_enabled and (self.auth_mode == "local" or self.market_source != "toss"):
             raise ValueError("실거래는 외부 인증 및 Toss 시세 연결에서만 활성화할 수 있습니다")
+        if self.upbit_live_enabled and (self.auth_mode == "local" or not self.upbit_enabled):
+            raise ValueError("업비트 실거래는 외부 인증 및 업비트 시세 연결에서만 활성화할 수 있습니다")
         return self

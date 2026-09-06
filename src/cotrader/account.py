@@ -34,7 +34,7 @@ def account_message(data):
 
 def crypto_account_message(data):
     snapshot = data.get("snapshot")
-    lines = ["업비트 실제 계좌 · 조회 전용"]
+    lines = ["업비트 실제 계좌 · " + ("조회 전용" if data.get("read_only", True) else "실거래 허용")]
     if data.get("status") != "CONNECTED" or data.get("stale"):
         lines.append(
             f"조회 확인 필요: {data.get('error') or data.get('status')} · 아래는 마지막 조회 값입니다"
@@ -48,5 +48,5 @@ def crypto_account_message(data):
         ]
     else:
         lines.append("확인된 계좌 데이터가 없습니다")
-    lines.append("봇 모의 자금과 별도이며 실제 주문·출금은 실행하지 않습니다")
+    lines.append("봇의 배정 예산과 별도입니다. 실거래는 전략별 시작 확인 후 실행됩니다")
     return "\n".join(lines)
