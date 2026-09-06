@@ -1199,7 +1199,7 @@ function App({
                   {confirm.strategy.version}
                 </p>
                 {Number(confirm.strategy.config.inventory_quantity) > 0 && (
-                  <div className="banner">
+                  <div className="banner inventory-confirm">
                     <strong>
                       보유 {confirm.strategy.config.inventory_quantity}
                       {unit} 전량을 이 전략에 편입합니다.
@@ -1256,22 +1256,26 @@ function App({
                     </table>
                   </div>
                 )}
-                <p>
-                  {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
-                  {confirm.strategy.config.fast}/{confirm.strategy.config.slow}{" "}
-                  · RSI {confirm.strategy.config.rsi_period}
-                </p>
-                {confirm.strategy.config.kind === "grid" && (
+                {!Number(confirm.strategy.config.inventory_quantity) && (
                   <p>
-                    {confirm.strategy.config.spacing === "geometric"
-                      ? "동일 비율"
-                      : "동일 금액"}{" "}
-                    간격 · 하락 시 매수 보류{" "}
-                    {confirm.strategy.config.signal_gate
-                      ? "사용"
-                      : "사용 안 함"}
+                    {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
+                    {confirm.strategy.config.fast}/
+                    {confirm.strategy.config.slow} · RSI{" "}
+                    {confirm.strategy.config.rsi_period}
                   </p>
                 )}
+                {confirm.strategy.config.kind === "grid" &&
+                  !Number(confirm.strategy.config.inventory_quantity) && (
+                    <p>
+                      {confirm.strategy.config.spacing === "geometric"
+                        ? "동일 비율"
+                        : "동일 금액"}{" "}
+                      간격 · 하락 시 매수 보류{" "}
+                      {confirm.strategy.config.signal_gate
+                        ? "사용"
+                        : "사용 안 함"}
+                    </p>
+                  )}
                 {confirm.strategy.config.kind === "rebound" && (
                   <p>
                     RSI 진입 {confirm.strategy.config.rsi_entry} · 매도{" "}

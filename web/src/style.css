@@ -797,6 +797,9 @@ footer {
 .inventory-form > p {
   color: #526149;
 }
+.inventory-confirm {
+  display: block;
+}
 .inventory-form .card-actions {
   position: sticky;
   bottom: -24px;
