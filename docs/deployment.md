@@ -1,0 +1,70 @@
+# Kubernetes 배포와 운영 인수
+
+**이번 작업에서는 배포하지 않는다.** 이 문서는 나중에 승인된 배포 작업에서 사용하는 절차다.
+
+## 실행 구조
+
+애플리케이션은 `Deployment`로 실행한다. 각 노드마다 실행하는 `DaemonSet`을 사용하지 않는다. 주문 실행기는 한 개만 활성화한다. 기존 MySQL 버전이나 다른 서비스 설정은 변경하지 않는다.
+
+## 배포 전에 준비할 값
+
+| 대상 | 내용 |
+|---|---|
+| 이미지 | ARM64·AMD64 이미지를 빌드·검증하고 commit 또는 digest로 고정 |
+| DNS·TLS | 운영자가 선택한 호스트 `trading.example.com`의 실제 소유·라우팅·인증서 확인 |
+| DB | 기존 MySQL에 Cotrader 전용 DB·사용자 |
+| 런타임 DB 권한 | cotrader 스키마의 SELECT·INSERT·UPDATE·DELETE만 |
+| 마이그레이션 | 분리된 DB 사용자로 cotrader 스키마 DDL; 변경 전 백업 |
+| 외부 통신 | 고정 출구 IP를 토스 허용 목록에 등록; REST·WS 모두 확인 |
+| 계좌 | 의도한 종합매매 계좌의 `accountSeq`를 확인하여 설정 |
+| Telegram | 기존 webhook·다른 polling 소비자 없는 전용 봇, 본인 ID |
+| 백업 | cotrader DB의 클러스터 밖 암호화 백업과 임시 DB 복원 검증 |
+| 장애 감시 | 클러스터 밖에서 API readiness·engine heartbeat 감시 |
+
+`deploy/k8s`는 Secret을 생성하지 않고 다음 이름을 참조한다.
+
+- `cotrader-database`: `COTRADER_DATABASE_URL` — 런타임 전용 DB 연결.
+- `cotrader-migration-database`: `COTRADER_DATABASE_URL` — 별도 DDL 연결.
+- `cotrader-toss`: `TOSS_INVEST_OPEN_API_CLIENT_ID`, `TOSS_INVEST_OPEN_API_CLIENT_SECRET`, `COTRADER_ACCOUNT_SEQ`.
+- `cotrader-identity`: `TELEGRAM_API_KEY`, `TELEGRAM_ME`, `COTRADER_SESSION_SECRET`, `COTRADER_GITHUB_CLIENT_ID`, `COTRADER_GITHUB_CLIENT_SECRET`, `COTRADER_GITHUB_USER_ID`.
+
+원본 키는 사용자가 지정한 `~/.config/tossinvest/openapi.env`, `~/.config/tossinvest/telegram.env`다. 새 키로 대체하지 않는다. 파일의 실제 값은 대화·로그·Git·이미지에 넣지 않는다. 배포 전 소유자 전용 파일 권한을 확인한다. 세션 서명과 DB 비밀번호는 새 앱 전용 자격증명으로 관리하고 공용 root DB 비밀번호를 앱에 제공하지 않는다.
+
+Toss 키는 engine에만, Telegram 토큰과 세션 서명은 api에만 주입한다. research는 DB 연결만 사용한다.
+
+## 실행 순서
+
+1. 빌드·Python 테스트·MySQL 통합 테스트·웹뷰 빌드를 통과시킨다. `kubectl kustomize deploy/k8s`로 출력물을 검토한다.
+2. 승인된 원격 저장소와 이미지 registry 경로를 확정하고 이미지를 게시한다. `REPLACE_WITH_VERIFIED_COMMIT` 두 곳을 실제 검증된 버전으로 바꾼다. 버전 문자열 그대로는 배포할 수 없다.
+3. DB·Secret·DNS·백업 준비를 완료한다. Secret 동기화는 값이 출력되지 않는 승인된 운영 경로를 사용한다.
+4. `deploy/migration-job.yaml`의 일회성 마이그레이션을 실행·확인한다. 진행 중인 engine과 동시에 스키마를 변경하지 않는다.
+5. `COTRADER_LIVE_ENABLED=false`를 확인하고 세 역할을 배포한다. API와 DB 연결, GitHub 본인 인증, 시세·캘린더·수집을 확인한다.
+6. 여러 실제 거래일 동안 모의 전략을 운영한다. 휴장·세션 전환, 재시작, 네트워크 끊김, 부분 체결 모의, 전체 중단, 비용·원장 대조를 확인한다.
+7. 실제 데이터 커버리지와 기업행사 영향을 검토하고 사용자가 실거래 종목·예산·위험 기준을 다시 승인할 때에만 별도 실거래 전환 작업을 한다.
+
+이미지 빌드 예시:
+
+```bash
+docker build -t cotrader:local .
+```
+
+두 아키텍처의 로컬 이미지 검증:
+
+```bash
+docker buildx build --platform linux/arm64,linux/amd64 --tag cotrader:local --load .
+```
+
+브라우저용 정적 파일은 빌드 머신의 아키텍처에서 한 번 만들고, Python 실행 환경은 각 대상 아키텍처로 구성한다. [Docker 공식 다중 플랫폼 빌드 문서](https://docs.docker.com/build/building/multi-platform/)의 `BUILDPLATFORM` 방식을 사용한다.
+
+DB 백업은 `mysqldump --single-transaction` 기반으로 cotrader 스키마를 매일 클러스터 밖에 보관한다. 최소 일별 7개·주별 4개를 유지하고 별도 임시 DB에 복원하여 원장 건수·누적 체결·마지막 주문 상태를 검사한다. 실제 저장 대상·암호화 키가 정해지기 전 백업 완료로 표시하지 않는다.
+
+## 중단·복구
+
+- 계획된 배포 전에 `/pause`를 실행하고 모든 봇 주문이 체결·취소 등 종료 상태인지 확인한다. 보유 주식은 유지한다.
+- 주문 응답이 불명확하면 `UNKNOWN`을 다른 상태로 직접 DB 수정하지 않는다. 토스의 열린 주문·종료 주문과 종목·방향·수량·가격·시각을 대조한다.
+- 웹뷰의 **주문 대조**에서 확인한 토스 주문 번호를 입력한다. `resolve` 명령은 `intent_id`와 확인한 `broker_id`를 받는다. 서버는 증권사 상세를 읽고 종목·방향·수량·가격이 맞고 다른 내부 주문과 연결되지 않았는지 확인해 원장을 반영한다. 주문 시각은 사용자가 함께 대조한다. 조회에서 보이지 않는다고 미제출로 가정하지 않는다.
+- 정전이나 DB 장애 중에는 앱이 취소를 완료할 수 없다. 토스 앱에서 남은 주문을 확인할 수 있어야 한다.
+- 복구 후 자동 재전송은 9분 이내의 같은 주문 의도에만 허용된다. 이미 중단한 전략이나 오래된 미확인 주문에는 재전송하지 않는다.
+- 롤백은 먼저 주문을 중단한 상태에서 이전 이미지로 수행한다. 원장 DB를 과거 백업으로 되돌리면 실제 증권사 주문과 달라질 수 있으므로 자동 DB 다운그레이드나 무조건 복원을 하지 않는다.
+
+첫 버전의 통계는 달러 기준의 봇 운용 기록이다. 계좌 전체 입출금·배당·기업행사의 자동 대사는 포함하지 않는다. 수동 거래·입출금·분할 후에는 봇 원장과 계좌를 확인한 다음 재개한다.

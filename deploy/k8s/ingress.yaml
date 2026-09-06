@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cotrader
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: public
+  tls:
+    - hosts: [trading.example.com]
+      secretName: cotrader-tls
+  rules:
+    - host: trading.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cotrader-api
+                port: {number: 80}
