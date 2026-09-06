@@ -171,7 +171,12 @@ async def test_coin_paper_strategy_runs_while_stock_market_is_closed(db, monkeyp
     engine.db, engine.sessions = database, sessions
     engine.broker = AsyncMock()
     engine.upbit = AsyncMock()
-    engine.upbit.markets.return_value = {"KRW-BTC": {"market": "KRW-BTC"}}
+    engine.upbit.markets.return_value = {
+        "KRW-BTC": {
+            "market": "KRW-BTC",
+            "market_event": {"warning": False, "caution": {"PRICE_FLUCTUATIONS": False}},
+        }
+    }
     engine.upbit.orderbooks.return_value = [
         Quote("KRW-BTC", D(94000000), D(94000000), datetime.now(UTC), D(2), D(2))
     ]

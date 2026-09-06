@@ -16,6 +16,17 @@ from cotrader.domain import D, Quote
 from cotrader.markets import validate_symbol
 
 
+def market_eligible(market):
+    event = (market or {}).get("market_event", {})
+    caution = event.get("caution")
+    return (
+        event.get("warning") is False
+        and isinstance(caution, dict)
+        and bool(caution)
+        and all(value is False for value in caution.values())
+    )
+
+
 def account_jwt(access_key: str, secret_key: str) -> str:
     def encode(value):
         return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).rstrip(b"=")

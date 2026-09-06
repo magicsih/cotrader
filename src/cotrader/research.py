@@ -268,6 +268,7 @@ def optimize_grid(
     progress=None,
     stop_requested=None,
     options: OptimizationOptions | None = None,
+    final_check: bool = True,
 ) -> dict:
     options = options or OptimizationOptions()
     if len(bars) < 300:
@@ -280,7 +281,7 @@ def optimize_grid(
     space, invalid = grid_search_space(base, train, options.space == "wide")
     axes = grid_axes(train, options.space == "wide")
     if not space:
-        raise ValueError("현재 예산·변동 범위에서 1주 단위 및 비용 조건을 만족하는 그리드가 없습니다")
+        raise ValueError("현재 예산·변동 범위에서 최소 주문 및 비용 조건을 만족하는 그리드가 없습니다")
 
     def report(stage, completed, total, percent):
         if stop_requested and stop_requested():
@@ -419,9 +420,17 @@ def optimize_grid(
     )
     # This selection is frozen before reading the last segment's prices or performance.
     report("마지막 기간 최종 확인", 0, 1, 95)
-    final_result = run(StrategySpec.model_validate(selected["spec"]), holdout, ordered[:final_cut])
+    final_result = (
+        run(StrategySpec.model_validate(selected["spec"]), holdout, ordered[:final_cut])
+        if final_check
+        else None
+    )
     reasons = list(selected["selection_failures"])
-    reasons += [f"마지막 구간: {r}" for r in performance_failures(final_result)]
+    reasons += (
+        [f"마지막 구간: {r}" for r in performance_failures(final_result)]
+        if final_check
+        else ["종목 간 선정 후 최종 기간 확인 대기"]
+    )
     observed_days = len({b.at.date() for b in ordered})
     if observed_days < 20:
         reasons.append("전체 데이터가 20일분 미만")

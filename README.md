@@ -105,3 +105,5 @@ MySQL 테스트는 무작위 로컬 포트의 임시 컨테이너를 사용하�
 구조와 실패 대응은 [설계 문서](docs/architecture.md), Kubernetes 준비 항목은 [배포 절차](docs/deployment.md), API 제약과 확인 근거는 [토스 연동 기록](docs/toss-contract.md)을 참고하세요.
 
 검증 방법과 시뮬레이션 한계는 [검증 문서](docs/verification.md)에 정리했습니다.
+
+처음에는 웹의 **쉽게 시작**에서 시장과 모의 예산만 정하면 된다. 종목·전략·그리드 가격을 함께 비교하는 별도 연구 프로세스의 동작과 제한은 [최적화 안내](docs/optimization.md)를 참고한다.

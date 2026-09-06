@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { ResearchLibrary } from "./ResearchLibrary";
+import { Start } from "./Start";
 import { Guide } from "./Guide";
 import {
   MarketContext,
@@ -12,7 +13,7 @@ import {
 } from "./Market";
 
 type Data = Record<string, any>;
-type Tab = "overview" | "strategies" | "research" | "orders";
+type Tab = "start" | "overview" | "strategies" | "research" | "orders";
 declare global {
   interface Window {
     Telegram?: { WebApp?: { initData: string; ready(): void; expand(): void } };
@@ -206,7 +207,7 @@ function App({
   const [tab, setTab] = useState<Tab>(
     new URLSearchParams(window.location.search).get("view") === "research"
       ? "research"
-      : "overview",
+      : "start",
   );
   const [mode, setMode] = useState("paper");
   const [status, setStatus] = useState<Data>({});
@@ -218,6 +219,7 @@ function App({
   const [snapshots, setSnapshots] = useState<Data[]>([]);
   const [datasets, setDatasets] = useState<Data[]>([]);
   const [jobs, setJobs] = useState<Data[]>([]);
+  const [discoveries, setDiscoveries] = useState<Data | null>(null);
   const [saved, setSaved] = useState<Data[]>([]);
   const [commands, setCommands] = useState<Data[]>([]);
   const [auth, setAuth] = useState(false);
@@ -263,7 +265,9 @@ function App({
       api("/commands"),
       api(`/account?venue=${venue}`),
       api("/recommendations"),
+      api(`/discoveries?venue=${venue}`),
     ]);
+    setDiscoveries(values[11]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
     setStrategies(values[2].filter((row: Data) => row.venue === venue));
@@ -321,12 +325,14 @@ function App({
     : 0;
   const connected = Date.now() - engineTime < 120000;
   const titles: Data = {
+    start: "쉽게 시작",
     overview: "포트폴리오",
     strategies: "내 전략",
     research: "전략 연구실",
     orders: "주문과 기록",
   };
   const subtitles: Data = {
+    start: "시장과 가상 예산을 고르면, 나머지는 함께 찾습니다.",
     overview: "수익뿐 아니라, 보유 자산의 변화까지 확인하세요.",
     strategies: "가격과 예산을 정하고, 확인한 전략만 실행하세요.",
     research: "실행하기 전에 과거 데이터로 비교하세요.",
@@ -373,7 +379,7 @@ function App({
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="#" onClick={() => setTab("overview")}>
+        <a className="brand" href="#" onClick={() => setTab("start")}>
           <span className="brand-mark">
             c<span>↗</span>
           </span>
@@ -382,27 +388,38 @@ function App({
           </div>
         </a>
         <nav>
-          {(["overview", "strategies", "research", "orders"] as Tab[]).map(
-            (key) => (
-              <button
-                key={key}
-                className={tab === key ? "active" : ""}
-                onClick={() => setTab(key)}
-              >
-                <Icon name={key} />
-                {titles[key]}
-                {key === "strategies" && (
-                  <span className="count">
-                    {
-                      strategies.filter(
-                        (s) => s.status !== "ARCHIVED" && s.mode === mode,
-                      ).length
-                    }
-                  </span>
-                )}
-              </button>
-            ),
-          )}
+          {(
+            ["start", "overview", "strategies", "research", "orders"] as Tab[]
+          ).map((key) => (
+            <button
+              key={key}
+              className={tab === key ? "active" : ""}
+              onClick={() => setTab(key)}
+            >
+              <Icon name={key} />
+              <span className="nav-full">{titles[key]}</span>
+              <span className="nav-compact">
+                {
+                  {
+                    start: "시작",
+                    overview: "자산",
+                    strategies: "전략",
+                    research: "연구",
+                    orders: "기록",
+                  }[key]
+                }
+              </span>
+              {key === "strategies" && (
+                <span className="count">
+                  {
+                    strategies.filter(
+                      (s) => s.status !== "ARCHIVED" && s.mode === mode,
+                    ).length
+                  }
+                </span>
+              )}
+            </button>
+          ))}
           <a className="guide-nav" href="/guide">
             사용 가이드 ↗
           </a>
@@ -475,34 +492,37 @@ function App({
           <div className="page-heading">
             <div>
               <div className="eyebrow">
-                {mode === "paper" ? "PAPER TRADING" : "LIVE TRADING"}
+                {tab === "start"
+                  ? "PAPER RESEARCH"
+                  : mode === "paper"
+                    ? "PAPER TRADING"
+                    : "LIVE TRADING"}
               </div>
               <h1>{titles[tab]}</h1>
               <p>{subtitles[tab]}</p>
             </div>
-            <button
-              className="primary"
-              onClick={() => setShowForm(true)}
-              disabled={!auth || (venue === "upbit" && mode === "live")}
-            >
-              <Icon name="plus" />새 전략
-            </button>
+            {tab !== "start" && (
+              <button
+                className="primary"
+                onClick={() => setShowForm(true)}
+                disabled={!auth || (venue === "upbit" && mode === "live")}
+              >
+                <Icon name="plus" />
+                직접 설정
+              </button>
+            )}
           </div>
-          <div className="getting-started">
-            <div>
-              <strong>처음 시작하시나요?</strong>
-              <p>
-                실제 종목 데이터 수집부터 모의매매까지, 단계별로 따라오세요.
-              </p>
-            </div>
-            <a className="primary" href="/guide">
-              사용 가이드 열기 →
-            </a>
-          </div>
-          {venue === "upbit" && (
-            <div className="banner">
-              업비트 원화 마켓 · 실제 시세를 이용한 연구·모의매매와 계좌 조회를
-              지원합니다. 실제 주문은 제공하지 않습니다.
+          {tab !== "start" && (
+            <div className="getting-started">
+              <div>
+                <strong>처음 시작하시나요?</strong>
+                <p>
+                  실제 종목 데이터 수집부터 모의매매까지, 단계별로 따라오세요.
+                </p>
+              </div>
+              <a className="primary" href="/guide">
+                사용 가이드 열기 →
+              </a>
             </div>
           )}
           {error && (
@@ -519,6 +539,25 @@ function App({
               <button onClick={() => setNotice("")} aria-label="안내 닫기">
                 ×
               </button>
+            </div>
+          )}
+          {tab === "start" && discoveries && (
+            <Start
+              data={discoveries}
+              api={api}
+              act={act}
+              busy={busy}
+              onDraft={() => {
+                setMode("paper");
+                setTab("strategies");
+              }}
+              onAdvanced={() => setTab("research")}
+            />
+          )}
+          {venue === "upbit" && (
+            <div className="banner">
+              업비트 원화 마켓 · 실제 시세를 이용한 연구·모의매매와 계좌 조회를
+              지원합니다. 실제 주문은 제공하지 않습니다.
             </div>
           )}
           {(status.market_source === "offline" || !connected) && (

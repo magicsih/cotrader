@@ -5,8 +5,9 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from cotrader.db import SingleWriter, database
+from cotrader.discovery_jobs import discovery_step
 from cotrader.domain import Bar, D, StrategySpec
-from cotrader.models import BacktestJob, CandleRow, Event
+from cotrader.models import BacktestJob, CandleRow, DiscoveryRun, Event
 from cotrader.research import OptimizationOptions, ResearchCancelled, backtest, optimize_grid
 from cotrader.validation import revalidate
 
@@ -154,6 +155,15 @@ async def run_worker(settings):
                         "FAILED",
                         {"message": "프로세스가 재시작되었습니다. 동일 설정으로 새 검증을 요청하세요"},
                     )
+                for row in (
+                    await session.scalars(
+                        select(DiscoveryRun).where(DiscoveryRun.status.in_(["RUNNING", "CANCEL_REQUESTED"]))
+                    )
+                ).all():
+                    row.status, row.result = (
+                        "FAILED",
+                        {"message": "연구 프로세스가 재시작되었습니다. 다시 탐색을 요청하세요"},
+                    )
             while True:
                 await lock.verify()
                 async with sessions.begin() as session:
@@ -166,6 +176,7 @@ async def run_worker(settings):
                     if job:
                         job.status = "RUNNING"
                 if not job:
+                    await discovery_step(settings, sessions, lock)
                     await asyncio.sleep(2)
                     continue
                 try:

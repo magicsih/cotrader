@@ -1028,7 +1028,7 @@ summary {
     position: fixed;
     inset: auto 0 0;
     width: 100%;
-    height: 66px;
+    height: 76px;
     padding: 5px 5px calc(5px + env(safe-area-inset-bottom));
     background: #183e34;
   }
@@ -1536,22 +1536,16 @@ input[type="checkbox"] {
   }
 }
 @media (max-width: 760px) {
-  .sidebar {
-    height: 76px;
+  .nav-full,
+  .sidebar .guide-nav {
+    display: none;
   }
-  .sidebar nav {
-    overflow-x: auto;
-    justify-content: flex-start;
-    padding-inline: 12px;
+  .sidebar .nav-compact {
+    display: inline;
   }
-  .sidebar nav button,
-  .guide-nav {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .guide-nav {
-    margin: 0;
-    padding: 12px;
+  .sidebar nav button {
+    min-width: 0;
+    font-size: 17px;
   }
   .shell > main {
     margin-top: 76px;
@@ -1601,5 +1595,215 @@ input[type="checkbox"] {
   .guide-header .primary {
     font-size: 0.9rem;
     padding-inline: 14px;
+  }
+}
+
+.nav-compact {
+  display: none;
+}
+
+/* A budget-first path for the first real-data experiment. */
+.easy-start {
+  display: grid;
+  gap: 24px;
+}
+.start-intro {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  gap: 40px;
+  padding: 36px;
+}
+.start-intro h2 {
+  font-size: clamp(30px, 3vw, 44px);
+  line-height: 1.25;
+  letter-spacing: -0.04em;
+  margin: 16px 0;
+}
+.start-intro p {
+  line-height: 1.7;
+}
+.start-intro form {
+  padding: 24px;
+  background: #f4f6f0;
+  border-radius: 14px;
+}
+.start-intro label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.start-intro input[type="number"] {
+  width: 100%;
+  font-size: 28px;
+  padding: 16px;
+}
+.start-options {
+  margin: 16px 0;
+}
+.easy-start summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-weight: 600;
+}
+.start-options select {
+  margin: 12px 0;
+  width: 100%;
+}
+.start-options .check-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.start-options input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.start-button {
+  width: 100%;
+  font-size: 20px;
+  min-height: 60px;
+  justify-content: center;
+}
+.start-universe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+.start-universe span {
+  padding: 10px 12px;
+  background: #f1f3ef;
+  border-radius: 8px;
+}
+.start-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+}
+.start-steps b {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #e7eee6;
+  color: #27634c;
+}
+.start-progress,
+.start-result {
+  padding: 32px;
+}
+.start-progress progress {
+  width: 100%;
+  height: 22px;
+  margin-bottom: 20px;
+  accent-color: #277357;
+}
+.collection-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid #e0e5dc;
+}
+.collection-row p {
+  flex-basis: 100%;
+}
+.start-progress button {
+  margin-top: 20px;
+}
+.start-pick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  margin: 24px 0;
+}
+.start-pick h3 {
+  font-size: 32px;
+  margin: 16px 0;
+}
+.start-pick h3 span {
+  font-size: 24px;
+  font-weight: 500;
+}
+.start-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 20px 0;
+}
+.start-metrics div {
+  background: #f5f6f2;
+  border-radius: 12px;
+  padding: 22px;
+}
+.start-metrics span {
+  display: block;
+  margin-bottom: 14px;
+}
+.start-metrics strong {
+  font-size: clamp(24px, 2.5vw, 32px);
+}
+.start-reasons {
+  background: #fff6e4;
+  padding: 24px;
+  border-radius: 12px;
+  margin: 24px 0;
+}
+.easy-start li {
+  margin: 12px 0;
+  line-height: 1.7;
+}
+.start-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 20px;
+  padding-bottom: 20px;
+}
+.start-footer p {
+  flex-basis: 100%;
+  line-height: 1.7;
+}
+.start-result .section-heading {
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.start-result select {
+  max-width: 100%;
+  display: block;
+  margin-top: 10px;
+}
+@media (max-width: 1100px) {
+  .start-intro {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+}
+@media (max-width: 600px) {
+  .start-intro,
+  .start-result,
+  .start-progress {
+    padding: 20px;
+  }
+  .start-intro form {
+    padding: 16px;
+  }
+  .start-metrics {
+    grid-template-columns: 1fr;
+  }
+  .start-pick h3 {
+    font-size: 28px;
+  }
+  .start-pick button {
+    width: 100%;
+    justify-content: center;
   }
 }

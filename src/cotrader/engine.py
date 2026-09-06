@@ -22,7 +22,7 @@ from cotrader.models import (
     now,
 )
 from cotrader.services import bootstrap, check_risk, process_command, put_runtime, record_execution
-from cotrader.upbit import UpbitBroker
+from cotrader.upbit import UpbitBroker, market_eligible
 
 LOG = logging.getLogger(__name__)
 
@@ -106,7 +106,11 @@ class Engine:
         async with self.sessions.begin() as session:
             commands = (
                 await session.scalars(
-                    select(Command).where(Command.status == "QUEUED").order_by(Command.created_at).limit(20)
+                    select(Command)
+                    .where(Command.status == "QUEUED")
+                    .order_by(Command.created_at)
+                    .limit(20)
+                    .with_for_update(skip_locked=True)
                 )
             ).all()
             for command in commands:
@@ -152,10 +156,7 @@ class Engine:
         await self.cancel_stopped()
         await self.dispatch()
         if self.settings.market_source == "toss" or self.settings.upbit_enabled:
-            try:
-                await self.ingest_page()
-            except (BrokerError, ValueError, KeyError) as exc:
-                await self.fail_ingestion(exc)
+            await self.ingest_page()
         async with self.sessions.begin() as session:
             await put_runtime(
                 session,
@@ -257,20 +258,16 @@ class Engine:
                 },
             )
 
-    async def fail_ingestion(self, exc):
+    async def fail_ingestion(self, exc, command_id):
         async with self.sessions.begin() as session:
             row = await session.scalar(
-                select(Command)
-                .where(Command.action == "ingest", Command.status == "RUNNING")
-                .order_by(Command.created_at)
+                select(Command).where(Command.id == command_id, Command.status == "RUNNING").with_for_update()
             )
             if row:
                 row.status = "FAILED"
                 row.result = {
                     **row.result,
-                    "message": exc.code
-                    if isinstance(exc, BrokerError)
-                    else "시세 응답을 처리하지 못했습니다",
+                    "message": exc.code if isinstance(exc, BrokerError) else str(exc)[:300],
                 }
 
     async def market_refresh(self, symbols, at):
@@ -559,11 +556,7 @@ class Engine:
                 )
                 if strategy.venue == "upbit":
                     market = self.upbit_markets.get(strategy.symbol)
-                    eligible = bool(
-                        market
-                        and market.get("market_warning", "NONE") == "NONE"
-                        and not market.get("market_event", {}).get("warning", False)
-                    )
+                    eligible = market_eligible(market)
                 if not eligible:
                     strategy.reason = "지원 종목·거래 상태 확인 필요"
                     continue
@@ -737,30 +730,50 @@ class Engine:
             )
         if not command:
             return
-        progress = dict(command.result)
-        payload = command.payload
-        venue = payload.get("venue", "toss")
-        if venue == "toss" and self.settings.market_source != "toss":
-            raise ValueError("토스 시세 연결이 비활성입니다")
-        if venue == "upbit" and not self.settings.upbit_enabled:
-            raise ValueError("업비트 시세 연결이 비활성입니다")
-        broker = self.upbit if venue == "upbit" else self.broker
-        data = await broker.candles(payload["symbol"], payload.get("interval", "1m"), progress.get("before"))
-        start = datetime.fromisoformat(payload["from"]).astimezone(UTC)
-        rows = [r for r in data["candles"] if Bar.parse(r).at >= start]
-        async with self.sessions.begin() as session:
-            row = await session.get(Command, command.id)
-            count = await self.save_candles(
-                session, payload["symbol"], payload.get("interval", "1m"), rows, venue=venue
+        try:
+            progress = dict(command.result)
+            payload = command.payload
+            venue = payload.get("venue", "toss")
+            if venue == "toss" and self.settings.market_source != "toss":
+                raise ValueError("토스 시세 연결이 비활성입니다")
+            if venue == "upbit" and not self.settings.upbit_enabled:
+                raise ValueError("업비트 시세 연결이 비활성입니다")
+            broker = self.upbit if venue == "upbit" else self.broker
+            if (
+                payload.get("require_eligible")
+                and venue == "upbit"
+                and not market_eligible(self.upbit_markets.get(payload["symbol"]))
+            ):
+                raise ValueError("시작 후보의 현재 거래 유의·주의 상태를 확인할 수 없거나 해당 상태입니다")
+            data = await broker.candles(
+                payload["symbol"], payload.get("interval", "1m"), progress.get("before")
             )
-            next_before = data.get("nextBefore")
-            progress.update(count=progress["count"] + count, pages=progress["pages"] + 1, before=next_before)
-            if not next_before or len(rows) != len(data["candles"]):
-                row.status = "SUCCEEDED"
-            elif next_before == command.result.get("before") or progress["pages"] >= 1000:
-                row.status = "REJECTED"
-                progress["message"] = "페이지 진행 정지 또는 수집 상한 도달 — 수집된 범위를 확인하세요"
-            row.result = progress
+            start = datetime.fromisoformat(payload["from"]).astimezone(UTC)
+            end = datetime.fromisoformat(payload["to"]).astimezone(UTC) if payload.get("to") else None
+            rows = [
+                r
+                for r in data["candles"]
+                if Bar.parse(r).at >= start and (end is None or Bar.parse(r).at < end)
+            ]
+            async with self.sessions.begin() as session:
+                row = await session.get(Command, command.id, with_for_update=True)
+                if row.status != "RUNNING":
+                    return
+                count = await self.save_candles(
+                    session, payload["symbol"], payload.get("interval", "1m"), rows, venue=venue
+                )
+                next_before = data.get("nextBefore")
+                progress.update(
+                    count=progress["count"] + count, pages=progress["pages"] + 1, before=next_before
+                )
+                if not next_before or any(Bar.parse(r).at < start for r in data["candles"]):
+                    row.status = "SUCCEEDED"
+                elif next_before == command.result.get("before") or progress["pages"] >= 1000:
+                    row.status = "REJECTED"
+                    progress["message"] = "페이지 진행 정지 또는 수집 상한 도달 — 수집된 범위를 확인하세요"
+                row.result = progress
+        except (BrokerError, ValueError, KeyError) as exc:
+            await self.fail_ingestion(exc, command.id)
 
     async def resolve_commands(self):
         async with self.sessions() as session:
