@@ -8,9 +8,20 @@ from sqlalchemy import select
 
 from cotrader.broker import BrokerError, TossBroker, current_session
 from cotrader.db import SingleWriter, database
-from cotrader.domain import ACTIVE_ORDERS, Bar, D, StrategySpec, aggregate, decide, levels, slot_quantity
-from cotrader.live import amount, upbit_policy
-from cotrader.markets import VENUES, currency, portfolio_key, round_quantity
+from cotrader.domain import (
+    ACTIVE_ORDERS,
+    Bar,
+    D,
+    StrategySpec,
+    aggregate,
+    decide,
+    funded_state,
+    grid_quantity,
+    levels,
+    slot_quantity,
+)
+from cotrader.live import InventoryGridRequest, amount, inventory_grid_spec, upbit_policy
+from cotrader.markets import VENUES, currency, order_size_valid, portfolio_key, round_quantity
 from cotrader.models import (
     AccountState,
     CandleRow,
@@ -22,7 +33,14 @@ from cotrader.models import (
     Strategy,
     now,
 )
-from cotrader.services import bootstrap, check_risk, process_command, put_runtime, record_execution
+from cotrader.services import (
+    bootstrap,
+    check_risk,
+    create_strategy,
+    process_command,
+    put_runtime,
+    record_execution,
+)
 from cotrader.upbit import UpbitBroker, market_eligible
 
 LOG = logging.getLogger(__name__)
@@ -106,13 +124,17 @@ class Engine:
             if not market_eligible(markets.get(spec.symbol)):
                 raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
             chance = await self.upbit.chance(spec.symbol)
-            cash, _, quantity = upbit_policy(chance, spec.symbol, spec.commission_rate)
+            cash, sellable, quantity = upbit_policy(chance, spec.symbol, spec.commission_rate)
             orders = await self.upbit.orders(spec.symbol)
         if any(o["symbol"] == spec.symbol and o["orderId"] not in owned for o in orders):
             raise ValueError("같은 종목의 수동 주문이 있습니다. 직접 정리한 후 다시 점검하세요")
-        if quantity != D(strategy.state["quantity"]):
+        importing = bool(spec.inventory_quantity and not strategy.state.get("funded"))
+        expected = spec.inventory_quantity if importing else D(strategy.state["quantity"])
+        if quantity != expected:
             raise ValueError(
-                "기존 보유분 또는 봇 장부와 다른 수량이 있습니다. 자동으로 매도·편입하지 않습니다"
+                "승인할 전량과 현재 계좌 수량이 다릅니다. 최신 보유 코인 초안을 다시 준비하세요"
+                if importing
+                else "기존 보유분 또는 봇 장부와 다른 수량이 있습니다. 자동으로 매도·편입하지 않습니다"
             )
         if cash < D(strategy.state["cash"]):
             raise ValueError("계좌의 사용 가능한 현금이 전략의 남은 현금 예산보다 적습니다")
@@ -120,6 +142,45 @@ class Engine:
             quotes = await self.upbit.orderbooks([spec.symbol])
             if not quotes or not quotes[0].valid(spec, datetime.now(UTC)):
                 raise ValueError("신선한 업비트 호가·허용 호가 차이 확인 필요")
+            if importing:
+                if sellable != expected:
+                    raise ValueError("편입할 코인의 일부가 잠겨 있습니다. 주문을 확인하세요")
+                if abs(quotes[0].bid / spec.inventory_reference_price - 1) > D("0.005"):
+                    raise ValueError(
+                        "평가 기준가에서 0.5% 넘게 변했습니다. 최신 보유 코인 초안을 다시 준비하세요"
+                    )
+            if spec.inventory_quantity:
+                from cotrader.models import uid
+
+                state = funded_state(spec) if importing else strategy.state
+                prices = levels(spec)
+                for i in range(spec.grids):
+                    lot = state["lots"][str(i)]
+                    held = D(lot["quantity"])
+                    buy_size = min(
+                        grid_quantity(spec, i) - held,
+                        round_quantity(D(lot["cash"]) / (prices[i] * (1 + spec.commission_rate)), "upbit"),
+                    )
+                    for side, size, price in (("SELL", held, prices[i + 1]), ("BUY", buy_size, prices[i])):
+                        if order_size_valid(size, price, "upbit"):
+                            upbit_policy(
+                                chance,
+                                spec.symbol,
+                                spec.commission_rate,
+                                side="ask" if side == "SELL" else "bid",
+                                total=price * size,
+                            )
+                            await self.upbit.test_order(
+                                Intent(
+                                    id=uid(),
+                                    venue="upbit",
+                                    symbol=spec.symbol,
+                                    side=side,
+                                    price=price,
+                                    quantity=size,
+                                )
+                            )
+                return
             price = levels(spec)[0] if spec.kind == "grid" and not quantity else quotes[0].ask
             size = round_quantity(quantity, "upbit") if quantity else slot_quantity(spec, price)
             side = "SELL" if quantity else "BUY"
@@ -135,6 +196,48 @@ class Engine:
             await self.upbit.test_order(
                 Intent(id=uid(), venue="upbit", symbol=spec.symbol, side=side, price=price, quantity=size)
             )
+
+    async def prepare_inventory(self, session, payload):
+        request = InventoryGridRequest.model_validate(payload)
+        if not self.settings.upbit_enabled:
+            raise ValueError("업비트 연결이 필요합니다")
+        existing = (
+            await session.scalars(
+                select(Strategy).where(
+                    Strategy.venue == "upbit",
+                    Strategy.mode == "live",
+                    Strategy.symbol == request.symbol,
+                )
+            )
+        ).all()
+        if any(row.state.get("funded") for row in existing):
+            raise ValueError("같은 코인을 이미 운용하는 전략이 있습니다")
+        markets = await self.upbit.markets()
+        if not market_eligible(markets.get(request.symbol)):
+            raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
+        chance = await self.upbit.chance(request.symbol)
+        quotes = await self.upbit.orderbooks([request.symbol])
+        if not quotes:
+            raise ValueError("최신 호가를 확인할 수 없습니다")
+        spec = inventory_grid_spec(request, chance, quotes[0])
+        # The temporary object is never inserted until account/test checks pass.
+        draft = Strategy(
+            venue="upbit",
+            mode="live",
+            symbol=spec.symbol,
+            config=spec.model_dump(mode="json"),
+            state={"funded": False, "quantity": "0", "cash": "0"},
+        )
+        await self.check_live_start(draft)
+        row = await create_strategy(session, f"{spec.symbol} 보유 전량 반복 그리드", spec, "live")
+        session.add(
+            Event(
+                kind="strategy",
+                strategy_id=row.id,
+                message="보유 전량 반복 그리드 초안 준비 — 시작 확인 대기",
+            )
+        )
+        return row
 
     async def reconnect(self):
         self.refresh = True
@@ -197,6 +300,19 @@ class Engine:
             ).all()
             for command in commands:
                 try:
+                    if command.action == "prepare_inventory":
+                        if now() - command.created_at > timedelta(minutes=5):
+                            raise ValueError("초안 준비 요청이 5분 이상 지연되었습니다. 다시 요청하세요")
+                        row = await self.prepare_inventory(session, command.payload)
+                        command.status, command.result = (
+                            "SUCCEEDED",
+                            {
+                                "message": "보유 전량 반복 그리드 초안을 준비했습니다. 내 전략에서 가격과 수량을 확인하고 시작하세요.",
+                                "strategy_id": row.id,
+                                "actual_order_created": False,
+                            },
+                        )
+                        continue
                     checked = False
                     if command.action in {"start", "check_live"}:
                         row = await session.get(Strategy, command.payload.get("strategy_id", ""))

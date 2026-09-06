@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from cotrader.domain import ACTIVE_ORDERS, D, StrategySpec, apply_fill, initial_state
+from cotrader.domain import ACTIVE_ORDERS, D, StrategySpec, apply_fill, funded_state, initial_state
 from cotrader.markets import VENUES, currency, portfolio_key, validate_symbol
 from cotrader.models import AccountState, Command, Event, Intent, Ledger, RuntimeState, Strategy, now
 
@@ -55,7 +55,7 @@ async def create_strategy(session, name: str, spec: StrategySpec, mode: str):
         venue=spec.venue,
         config=spec.model_dump(mode="json"),
         mode=mode,
-        state={**initial_state(spec.budget), "funded": False},
+        state={**initial_state(D(0) if spec.inventory_quantity else spec.budget), "funded": False},
     )
     session.add(row)
     await session.flush()
@@ -77,6 +77,7 @@ async def enqueue(session, command_id: str, action: str, payload: dict, actor: s
         "resolve",
         "archive",
         "check_live",
+        "prepare_inventory",
     }:
         raise ValueError("지원하지 않는 명령입니다")
     command = Command(id=command_id, action=action, payload=payload, actor=actor)
@@ -133,7 +134,9 @@ async def process_command(session, command, settings, *, live_checked=False):
             raise ValueError("전략별 배정 예산 합계가 총예산을 초과합니다")
         if len(funded) >= 5:
             raise ValueError("첫 버전은 최대 5개 종목까지 동시에 운영합니다")
-        state = dict(row.state)
+        state = (
+            funded_state(spec) if spec.inventory_quantity and not row.state.get("funded") else dict(row.state)
+        )
         state.update(funded=True, last_mid=None, last_bar=None)
         row.state, row.status, row.reason = state, "RUNNING", "시세·계좌 확인 대기"
         session.add(
@@ -225,7 +228,7 @@ async def process_command(session, command, settings, *, live_checked=False):
         # Resolution needs broker readback and is performed by the engine.
         command.status = "RUNNING"
         return
-    elif command.action == "check_live":
+    elif command.action in {"check_live", "prepare_inventory"}:
         raise ValueError("실거래 준비 점검은 엔진의 계좌 확인이 필요합니다")
     command.status, command.result = "SUCCEEDED", {"message": "반영했습니다"}
 
@@ -331,7 +334,13 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
             quote = quotes.get(strategy.symbol)
             spec = StrategySpec.model_validate(strategy.config)
             fresh = quote is not None and quote.fresh(spec, datetime.now(UTC))
-            if strategy.status == "RUNNING" and spec.kind == "grid" and fresh and quote.mid < spec.lower:
+            if (
+                strategy.status == "RUNNING"
+                and spec.kind == "grid"
+                and not spec.inventory_quantity
+                and fresh
+                and quote.mid < spec.lower
+            ):
                 strategy.status, strategy.reason = "PAUSED", "그리드 하단 이탈 — 보유 유지"
                 session.add(
                     Event(

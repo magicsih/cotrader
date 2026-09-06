@@ -1,6 +1,53 @@
 """Live-order checks shared by readiness and dispatch. No order submission here."""
 
-from cotrader.domain import D
+from decimal import ROUND_CEILING
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from cotrader.domain import D, StrategySpec
+from cotrader.markets import price_tick, round_quantity, validate_symbol
+
+
+class InventoryGridRequest(BaseModel):
+    symbol: str
+    allocation: Literal["all"]
+    first_sell_basis: Literal["average", "market"]
+    grids: int = Field(default=5, ge=2, le=30)
+    step_percent: D = Field(default=D("2"), ge=D("0.5"), le=D("10"))
+
+
+def inventory_grid_spec(request, chance, quote):
+    validate_symbol("upbit", request.symbol)
+    fee = max(amount(chance[k]) for k in ("bid_fee", "ask_fee", "maker_bid_fee", "maker_ask_fee"))
+    commission = max(fee, D("0.001"))
+    _, available, total = upbit_policy(chance, request.symbol, commission)
+    if not available or available != total or available != round_quantity(available, "upbit"):
+        raise ValueError("매도 가능 전량이 필요합니다. 잠긴 수량·소수점 자릿수·미체결을 확인하세요")
+    average = amount(chance["ask_account"]["avg_buy_price"])
+    ratio = 1 + request.step_percent / 100
+    target = quote.ask * ratio
+    if request.first_sell_basis == "average":
+        if not average:
+            raise ValueError("평균 매수가를 확인할 수 없습니다. 현재가 기준을 선택하세요")
+        target = max(target, average / (1 - commission))
+    target = price_tick(target, "upbit", ROUND_CEILING)
+    lower = price_tick(target / ratio, "upbit", ROUND_CEILING)
+    spec = StrategySpec(
+        venue="upbit",
+        symbol=request.symbol,
+        kind="grid",
+        budget=available * quote.bid,
+        inventory_quantity=available,
+        inventory_reference_price=quote.bid,
+        inventory_average_price=average,
+        lower=lower,
+        upper=price_tick(lower * ratio**request.grids, "upbit", ROUND_CEILING),
+        grids=request.grids,
+        spacing="geometric",
+        commission_rate=commission,
+    )
+    return spec
 
 
 def amount(value):

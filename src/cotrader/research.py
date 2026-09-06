@@ -43,6 +43,10 @@ def backtest(
     warmup=None,
     stop_requested=None,
 ) -> dict:
+    if spec.inventory_quantity:
+        raise ValueError(
+            "보유 코인 편입 초안은 현재 계좌와 평가 기준가를 포함합니다. 과거 검증에는 별도의 현금 기준 연구 설정을 사용하세요"
+        )
     if len(bars) < 3:
         raise ValueError("백테스트에는 최소 3개의 1분봉이 필요합니다")
     bars = sorted(bars, key=lambda b: b.at)

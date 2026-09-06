@@ -17,6 +17,9 @@ class StrategySpec(BaseModel):
     symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,23}$")
     kind: Literal["grid", "trend", "rebound"] = "grid"
     budget: Decimal = Field(gt=0, le=10000000)
+    inventory_quantity: Decimal = Field(default=D(0), ge=0)
+    inventory_reference_price: Decimal | None = Field(default=None, gt=0)
+    inventory_average_price: Decimal | None = Field(default=None, ge=0)
     lower: Decimal | None = Field(default=None, gt=0)
     upper: Decimal | None = Field(default=None, gt=0)
     grids: int = Field(default=5, ge=2, le=30)
@@ -36,6 +39,21 @@ class StrategySpec(BaseModel):
     @model_validator(mode="after")
     def validate_grid(self):
         validate_symbol(self.venue, self.symbol)
+        if self.inventory_quantity:
+            if self.venue != "upbit" or self.kind != "grid":
+                raise ValueError("보유 코인 편입은 업비트 반복 그리드에서만 지원합니다")
+            if self.signal_gate:
+                raise ValueError(
+                    "보유 시작 그리드는 단계별 가격 조건으로 재매수합니다. 신호 필터를 함께 지정할 수 없습니다"
+                )
+            if (
+                self.inventory_reference_price is None
+                or self.inventory_quantity != round_quantity(self.inventory_quantity, self.venue)
+                or self.budget != self.inventory_quantity * self.inventory_reference_price
+            ):
+                raise ValueError("편입 수량·평가 기준가·배정 평가금액이 일치해야 합니다")
+        elif self.inventory_reference_price is not None or self.inventory_average_price is not None:
+            raise ValueError("편입 수량 없이 보유 코인 기준가를 지정할 수 없습니다")
         if self.venue == "toss" and self.budget > 5000:
             raise ValueError("미국 주식의 전략 예산은 최대 5,000 USD입니다")
         if self.fast >= self.slow:
@@ -46,7 +64,9 @@ class StrategySpec(BaseModel):
             prices = levels(self)
             if len(set(prices)) != len(prices):
                 raise ValueError("호가 단위 반올림 후 가격선이 중복됩니다")
-            if any(not order_size_valid(slot_quantity(self, p), p, self.venue) for p in prices[:-1]):
+            if any(
+                not order_size_valid(grid_quantity(self, i), p, self.venue) for i, p in enumerate(prices[:-1])
+            ):
                 raise ValueError(
                     "가격선마다 주식은 최소 1주, 코인은 최소 5,000원이 필요합니다. 예산을 늘리거나 단계를 줄이세요"
                 )
@@ -74,6 +94,32 @@ def levels(spec: StrategySpec) -> list[Decimal]:
 
 def slot_quantity(spec: StrategySpec, price: Decimal) -> Decimal:
     return round_quantity(spec.budget * D("0.98") / spec.grids / price, spec.venue)
+
+
+def grid_quantity(spec: StrategySpec, slot: int) -> Decimal:
+    if not spec.inventory_quantity:
+        return slot_quantity(spec, levels(spec)[slot])
+    size = round_quantity(spec.inventory_quantity / spec.grids, spec.venue)
+    return size if slot < spec.grids - 1 else spec.inventory_quantity - size * (spec.grids - 1)
+
+
+def funded_state(spec: StrategySpec) -> dict:
+    if not spec.inventory_quantity:
+        return initial_state(spec.budget)
+    state = initial_state(D(0))
+    state.update(
+        quantity=str(spec.inventory_quantity),
+        cost_basis=str(spec.budget),
+        lots={
+            str(i): {
+                "quantity": str(grid_quantity(spec, i)),
+                "cost": str(grid_quantity(spec, i) * spec.inventory_reference_price),
+                "cash": "0",
+            }
+            for i in range(spec.grids)
+        },
+    )
+    return state
 
 
 def initial_state(budget: Decimal) -> dict:
@@ -210,6 +256,8 @@ def aggregate(bars: list[Bar], minutes: int, at: datetime) -> list[Bar]:
 
 
 def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tuple[Decision | None, str]:
+    if spec.inventory_quantity:
+        return inventory_decision(spec, state, quote)
     if spec.kind == "grid":
         if quote.mid < spec.lower:
             return None, "GRID_LOWER_BREACH"
@@ -282,6 +330,29 @@ def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tu
     return None, "매매 조건 대기"
 
 
+def inventory_decision(spec: StrategySpec, state: dict, quote: Quote):
+    """Each pair recycles its own proceeds, including partial fills across restarts."""
+    prices = levels(spec)
+    for i in range(spec.grids):
+        lot = state["lots"][str(i)]
+        quantity = D(lot["quantity"])
+        if quote.bid >= prices[i + 1] and order_size_valid(quantity, prices[i + 1], spec.venue):
+            return Decision(
+                "SELL", quantity, prices[i + 1], "보유 코인 그리드 매도 가격 도달", i
+            ), "매도 신호"
+    for i in reversed(range(spec.grids)):
+        lot = state["lots"][str(i)]
+        missing = grid_quantity(spec, i) - D(lot["quantity"])
+        if missing <= 0 or quote.ask > prices[i]:
+            continue
+        size = min(
+            missing, round_quantity(D(lot["cash"]) / (prices[i] * (1 + spec.commission_rate)), spec.venue)
+        )
+        if order_size_valid(size, prices[i], spec.venue):
+            return Decision("BUY", size, prices[i], "해당 단계의 매도대금으로 재매수", i), "재매수 신호"
+    return None, "보유 코인 매도·재매수 가격 대기"
+
+
 def apply_fill(state: dict, side: str, quantity: Decimal, amount: Decimal, costs: Decimal, slot: int | None):
     owned, basis = D(state["quantity"]), D(state["cost_basis"])
     cash, realized = D(state["cash"]), D(state["realized"])
@@ -289,6 +360,11 @@ def apply_fill(state: dict, side: str, quantity: Decimal, amount: Decimal, costs
         raise ValueError("누적 체결 수량 또는 금액이 감소했습니다")
     lots = {k: dict(v) for k, v in state["lots"].items()}
     lot = lots.get(str(slot), {"quantity": "0", "cost": "0"}) if slot is not None else None
+    recycled = None
+    if lot is not None and "cash" in lot:
+        recycled = D(lot["cash"]) + (amount - costs if side == "SELL" else -amount - costs)
+        if recycled < 0:
+            raise ValueError("해당 단계의 매도대금보다 큰 재매수 체결입니다")
     if side == "BUY":
         cash -= amount + costs
         owned += quantity
@@ -308,6 +384,8 @@ def apply_fill(state: dict, side: str, quantity: Decimal, amount: Decimal, costs
         if lot is not None:
             lot = {"quantity": str(D(lot["quantity"]) - quantity), "cost": str(D(lot["cost"]) - removed)}
     if lot is not None:
+        if recycled is not None:
+            lot["cash"] = str(recycled)
         lots[str(slot)] = lot
     state.update(
         cash=str(cash),

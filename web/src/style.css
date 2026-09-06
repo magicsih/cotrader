@@ -794,6 +794,16 @@ footer {
 .form-modal {
   width: 590px;
 }
+.inventory-form > p {
+  color: #526149;
+}
+.inventory-form .card-actions {
+  position: sticky;
+  bottom: -24px;
+  background: #fbfcf8;
+  padding: 14px 0;
+  z-index: 1;
+}
 .close {
   font-size: 1.6111rem;
   color: #95a387;

@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from cotrader.auth import require_actor, session_token, telegram_user
 from cotrader.config import Settings
 from cotrader.db import database
-from cotrader.domain import Bar, StrategySpec, levels, slot_quantity
+from cotrader.domain import Bar, StrategySpec, grid_quantity, levels
 from cotrader.markets import Venue, currency, portfolio_key, validate_symbol
 from cotrader.models import BacktestJob, CandleRow, Command, Event, Intent, RuntimeState, Snapshot, Strategy
 from cotrader.research import OptimizationOptions
@@ -212,7 +212,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                 {
                     "buy": str(p),
                     "sell": str(levels(body.spec)[i + 1]),
-                    "quantity": str(slot_quantity(body.spec, p)),
+                    "quantity": str(grid_quantity(body.spec, i)),
                 }
                 for i, p in enumerate(levels(body.spec)[:-1])
             ]

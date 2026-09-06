@@ -248,17 +248,19 @@ class TelegramBot:
                 details = f"{row.name} · {row.symbol} · {row.mode}\n상태 {row.status}\n예산 {c['budget']} {cur} · 전략 {c['kind']}\n"
                 if c["kind"] == "grid":
                     details += f"범위 {c['lower']}~{c['upper']} {cur} · {c['grids']}단계 · {c['spacing']}\n"
-                    from cotrader.domain import StrategySpec, levels, slot_quantity
+                    from cotrader.domain import StrategySpec, grid_quantity, levels
 
                     spec = StrategySpec.model_validate(c)
                     prices = levels(spec)
                     details += (
                         "\n".join(
-                            f"{price} → {prices[i + 1]} {cur} · {slot_quantity(spec, price)}{unit}"
+                            f"{price} → {prices[i + 1]} {cur} · {grid_quantity(spec, i)}{unit}"
                             for i, price in enumerate(prices[:-1])
                         )
                         + "\n"
                     )
+                    if spec.inventory_quantity:
+                        details += f"보유 전량 {spec.inventory_quantity}{unit} 편입 · 추가 원화 0 · 매도부터 시작\n각 단계의 매도대금으로만 재매수 반복 · 운용 손익은 평가 기준가 {spec.inventory_reference_price}부터 계산\n"
                     details += f"하락 시 신규 매수 보류: {'사용' if c['signal_gate'] else '사용 안 함'}\n"
                 details += f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']}/매도 {c['rsi_exit']}\n수수료 가정 {c['commission_rate']} · 체결 비용 {c['slippage_bps']}bp\n"
                 details += f"{c['timeframe']}분 신호 · 최대 호가 차이 {c['max_spread_bps']}bp\n손실 기준: 하루 {risk['daily_loss']} {cur}, 고점 대비 {risk['drawdown']} {cur}\n전체 세션 · 중단 시 보유 유지\n설정 버전 {row.version}"

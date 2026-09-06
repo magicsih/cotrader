@@ -27,7 +27,7 @@ def order_size_valid(quantity: Decimal, price: Decimal, venue: Venue) -> bool:
     return quantity > 0 and (quantity * price >= 5000 if venue == "upbit" else quantity >= 1)
 
 
-def price_tick(price: Decimal, venue: Venue) -> Decimal:
+def price_tick(price: Decimal, venue: Venue, rounding=ROUND_DOWN) -> Decimal:
     if venue == "toss":
         step = Decimal("0.0001") if price < 1 else Decimal("0.01")
     else:
@@ -49,7 +49,7 @@ def price_tick(price: Decimal, venue: Venue) -> Decimal:
             (".00001", ".0000001"),
         ]
         step = next((Decimal(s) for lower, s in bands if price >= Decimal(lower)), Decimal(".00000001"))
-    return (price / step).to_integral_value(rounding=ROUND_DOWN) * step
+    return (price / step).to_integral_value(rounding=rounding) * step
 
 
 def portfolio_key(venue: Venue, mode: str) -> str:
