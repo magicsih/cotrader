@@ -77,7 +77,8 @@ class TossBroker:
             raise BrokerError("live-disabled")
         for attempt in range(3 if method == "GET" else 1):
             await self.throttle(group)
-            headers = {"Authorization": f"Bearer {await self.access_token()}"}
+            token = await self.access_token()
+            headers = {"Authorization": f"Bearer {token}"}
             if account:
                 if self.settings.account_seq is None:
                     raise BrokerError("account-not-selected")
@@ -98,10 +99,13 @@ class TossBroker:
                     raise BrokerError("missing-result", ambiguous=method != "GET")
                 return payload["result"]
             code = payload.get("error", {}).get("code", f"http-{response.status_code}")
-            if method == "GET" and attempt < 2:
-                if response.status_code == 401 and code == "expired-token":
+            if response.status_code == 401 and code in {"expired-token", "invalid-token"}:
+                # Another request may already have refreshed the cached token.
+                if self.token == token:
                     self.expires = 0
+                if method == "GET" and attempt < 2:
                     continue
+            if method == "GET" and attempt < 2:
                 if response.status_code == 429:
                     await asyncio.sleep(
                         min(60, max(1, float(response.headers.get("Retry-After", "1")))) + random.random()

@@ -110,3 +110,55 @@ def test_configuration_errors_do_not_include_secret_inputs():
     with pytest.raises(ValueError) as exc:
         Settings(auth_mode="telegram", TELEGRAM_API_KEY="super-secret-value", TELEGRAM_ME=7)
     assert "super-secret-value" not in str(exc.value)
+
+
+@pytest.mark.parametrize("code", ["invalid-token", "expired-token"])
+async def test_read_refreshes_a_revoked_or_expired_cached_token(code):
+    tokens, reads = 0, 0
+
+    def handle(request):
+        nonlocal tokens, reads
+        if request.url.path == "/oauth2/token":
+            tokens += 1
+            return httpx.Response(200, json={"access_token": f"fixture-{tokens}", "expires_in": 86400})
+        reads += 1
+        if reads == 1:
+            return httpx.Response(401, json={"error": {"code": code}})
+        assert request.headers["Authorization"] == "Bearer fixture-2"
+        return httpx.Response(200, json={"result": []})
+
+    broker = TossBroker(
+        settings(), httpx.AsyncClient(base_url=TossBroker.base_url, transport=httpx.MockTransport(handle))
+    )
+    try:
+        assert await broker.accounts() == []
+        assert tokens == 2 and reads == 2
+    finally:
+        await broker.close()
+
+
+async def test_order_auth_failure_expires_token_without_resending_order():
+    posts, tokens = 0, 0
+
+    def handle(request):
+        nonlocal posts, tokens
+        if request.url.path == "/oauth2/token":
+            tokens += 1
+            return httpx.Response(200, json={"access_token": f"fixture-{tokens}", "expires_in": 86400})
+        if request.method == "POST":
+            posts += 1
+            return httpx.Response(401, json={"error": {"code": "invalid-token"}})
+        return httpx.Response(200, json={"result": []})
+
+    broker = TossBroker(
+        settings(runtime_role="engine", auth_mode="github", market_source="toss", live_enabled=True),
+        httpx.AsyncClient(base_url=TossBroker.base_url, transport=httpx.MockTransport(handle)),
+    )
+    try:
+        with pytest.raises(BrokerError, match="invalid-token"):
+            await broker.request("POST", "/api/v1/orders", body={"clientOrderId": "fixture-stable"})
+        assert posts == 1 and broker.expires == 0
+        assert await broker.accounts() == []
+        assert tokens == 2 and posts == 1
+    finally:
+        await broker.close()
