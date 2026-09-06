@@ -203,9 +203,14 @@ async def process_command(session, command, settings):
             raise ValueError("업비트 시세 연결이 비활성입니다")
         if payload.get("interval", "1m") not in {"1m", "1d"}:
             raise ValueError("1m 또는 1d만 지원합니다")
-        if datetime.fromisoformat(payload["from"]).tzinfo is None:
+        start = datetime.fromisoformat(payload["from"])
+        if start.tzinfo is None:
             raise ValueError("수집 시작 시각에는 시간대가 필요합니다")
-        command.status, command.result = "RUNNING", {"count": 0, "pages": 0, "before": None}
+        if payload.get("to"):
+            end = datetime.fromisoformat(payload["to"])
+            if end.tzinfo is None or end <= start:
+                raise ValueError("수집 종료 시각에는 시간대가 필요하며 시작 이후여야 합니다")
+        command.status, command.result = "RUNNING", {"count": 0, "pages": 0, "before": payload.get("to")}
         return
     elif command.action == "resolve":
         # Resolution needs broker readback and is performed by the engine.

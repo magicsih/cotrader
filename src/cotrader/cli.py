@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import signal
 
 import uvicorn
 
@@ -13,6 +14,18 @@ class PrivateQueryFilter(logging.Filter):
             address, method, path, version, status = record.args
             record.args = (address, method, path.split("?", 1)[0], version, status)
         return True
+
+
+async def run_daemon(work):
+    task = asyncio.create_task(work)
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 def main():
@@ -57,11 +70,11 @@ def main():
     elif args.role == "engine":
         from cotrader.engine import Engine
 
-        asyncio.run(Engine(settings).run())
+        asyncio.run(run_daemon(Engine(settings).run()))
     else:
         from cotrader.worker import run_worker
 
-        asyncio.run(run_worker(settings))
+        asyncio.run(run_daemon(run_worker(settings)))
 
 
 if __name__ == "__main__":

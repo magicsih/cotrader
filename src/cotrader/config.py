@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     )
     telegram_token: SecretStr = Field(default=SecretStr(""), validation_alias="TELEGRAM_API_KEY")
     telegram_me: int = Field(default=0, validation_alias="TELEGRAM_ME")
+    discovery_collection_seconds: int = Field(default=1800, ge=60, le=7200)
+    discovery_compute_seconds: int = Field(default=1200, ge=30, le=3600)
     static_dir: str = "web/dist"
 
     def capital_for(self, venue):

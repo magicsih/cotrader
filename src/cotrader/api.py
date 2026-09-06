@@ -85,6 +85,9 @@ def create_app(settings: Settings | None = None, sessions_override=None):
     from cotrader.research_routes import research_routes
 
     app.include_router(research_routes(sessions, serialize))
+    from cotrader.discovery_routes import discovery_routes
+
+    app.include_router(discovery_routes(settings, sessions, serialize))
 
     @app.middleware("http")
     async def headers(request, call_next):

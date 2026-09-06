@@ -153,6 +153,28 @@ class RuntimeState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
+class DiscoveryPlan(Base):
+    __tablename__ = "discovery_plans"
+    venue: Mapped[str] = mapped_column(String(12), primary_key=True)
+    request: Mapped[dict] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class DiscoveryRun(Base):
+    __tablename__ = "discovery_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    venue: Mapped[str] = mapped_column(String(12), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="COLLECTING", index=True)
+    request: Mapped[dict] = mapped_column(JSON)
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    strategy_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class LoginChallenge(Base):
     __tablename__ = "login_challenges"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
