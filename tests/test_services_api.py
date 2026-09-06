@@ -112,7 +112,7 @@ async def test_risk_includes_unrealized_losses_and_is_persistent(db):
         quote = Quote("TEST", D(90), D(90), datetime.now(UTC))
         await check_risk(session, Settings(), {"TEST": quote}, "")
     async with sessions() as session:
-        account = await session.get(AccountState, "paper")
+        account = await session.get(AccountState, {"venue": "toss", "mode": "paper"})
         row = await session.get(Strategy, row_id)
         assert account.halted and row.status == "PAUSED"
         assert D(row.state["quantity"]) == 10
@@ -125,7 +125,7 @@ async def test_missing_market_data_is_not_zero_equity(db):
         row = await session.get(Strategy, row_id)
         row.state = {**row.state, "cash": "900", "quantity": "1", "cost_basis": "100"}
         await check_risk(session, Settings(), {}, "")
-        snapshot = await session.get(RuntimeState, "portfolio:paper")
+        snapshot = await session.get(RuntimeState, "portfolio:toss:paper")
         assert snapshot.data["equity"] is None
         assert not snapshot.data["complete"]
 
@@ -149,7 +149,7 @@ async def test_wide_spread_and_pending_order_do_not_hide_lower_grid_breach(db):
         )
         await check_risk(session, Settings(), {"TEST": Quote("TEST", D(80), D(98), datetime.now(UTC))}, "")
         assert row.status == "PAUSED" and "하단 이탈" in row.reason
-        portfolio = await session.get(RuntimeState, "portfolio:paper")
+        portfolio = await session.get(RuntimeState, "portfolio:toss:paper")
         assert portfolio.data["complete"] and D(portfolio.data["equity"]) == 4960
 
 
@@ -202,7 +202,7 @@ async def test_archive_releases_budget_without_erasing_realized_losses(db):
         command = await enqueue(session, "finish", "archive", {"strategy_id": row_id}, "local")
         await process_command(session, command, Settings())
         await check_risk(session, Settings(), {}, "")
-        portfolio = await session.get(RuntimeState, "portfolio:paper")
+        portfolio = await session.get(RuntimeState, "portfolio:toss:paper")
         assert D(portfolio.data["equity"]) == 4980
         assert D(portfolio.data["realized_gross"]) == -19
         assert row.status == "ARCHIVED" and not row.state["funded"]

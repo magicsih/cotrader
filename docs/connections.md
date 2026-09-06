@@ -31,7 +31,7 @@ uv run cotrader research
 - 지정한 사용자 ID와 같은 ID의 **개인 대화방**만 허용한다.
 - `getMe`, `getChat`, `getWebhookInfo`로 연결 대상을 확인하고 그 대화방에 명령 메뉴를 등록한다.
 - 기존 웹훅이 있으면 자동 삭제하지 않는다. MySQL 잠금으로 이 앱의 중복 수신기를 차단한다.
-- `/status`, `/account`, `/strategies`, `/pause`, `/web`, `/help`를 제공한다.
+- `/status`, `/account`, `/crypto`, `/guide`, `/strategies`, `/pause`, `/web`, `/help`를 제공한다.
 - 첫 연결 이전의 알림은 보내지 않는다. 재시작 이전 승인 버튼은 새로 요청하도록 안내한다.
 - `/account`는 engine이 저장한 마지막 성공 조회를 읽고, 매매 명령을 만들지 않는다.
 - 송신 영수증에는 메시지 ID만 저장한다. 자격증명과 메시지 본문을 로그에 남기지 않는다.
@@ -39,3 +39,13 @@ uv run cotrader research
 기본 웹은 loopback의 로컬 인증 모드다. 운영 웹은 HTTPS 주소에서 GitHub 또는 Telegram 인증을 설정한다. GitHub 모드의 `/web`은 일반 HTTPS 링크를 보내므로 브라우저에서 GitHub 로그인을 진행한다. Telegram 모드는 Mini App 버튼을 사용한다.
 
 참고: [Telegram Bot API](https://core.telegram.org/bots/api).
+
+## 업비트
+
+`COTRADER_UPBIT_ENABLED=true`를 세 역할에 설정하면 원화 코인 시세 수집·연구·모의매매를 사용할 수 있다. 계좌 조회는 engine에 `COTRADER_UPBIT_ACCOUNT_READS_ENABLED=true`, `UPBIT_OPEN_API_ACCESS_KEY`, `UPBIT_OPEN_API_SECRET_KEY`를 추가로 주입한다. 로컬 `--connect`는 기존 토스·텔레그램 전용이므로 업비트 설정은 역할별 환경변수 또는 Kubernetes Secret을 사용한다. 키 파일을 저장소나 이미지에 복사하지 않는다.
+
+공개 시세는 키 없이 조회한다. 비공개 요청은 HS512 JWT로 서명한 `GET /v1/accounts`만 지원하며, 주문·취소·출금 요청은 전송 계층에서 거절한다. 앱의 읽기 전용 구현과 API 키 자체의 권한은 별개다. 계좌 값은 **시장 선택 → 업비트 코인 → 포트폴리오**와 Telegram `/crypto`에서 조회하며 로그인과 본인 대화방 제한이 적용된다.
+
+`KRW-BTC`, `KRW-ETH` 같은 원화 거래쌍을 지원한다. 시세는 거래소의 1분봉을 페이지별로 수집하고, 거래가 없는 분을 채우지 않는다. 418·429 응답은 최소 60초 대기하며 즉시 반복 호출하지 않는다. 모의 잔액·예산은 실제 계좌 잔액과 별도이고, KRW와 USD 손익을 더하거나 자동 환전하지 않는다. 코인의 하루 손실 기준은 UTC 날짜로 갱신한다.
+
+공식 근거: [인증](https://docs.upbit.com/kr/reference/auth), [분봉](https://docs.upbit.com/kr/reference/list-candles-minutes), [원화 거래 단위](https://docs.upbit.com/kr/docs/krw-market-info).

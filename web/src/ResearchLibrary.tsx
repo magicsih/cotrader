@@ -48,6 +48,7 @@ export function ResearchLibrary({
   const comparisonKey = (j: Data) =>
     JSON.stringify([
       j.result.data_hash,
+      j.request.spec.venue || "toss",
       j.request.spec.symbol,
       j.request.spec.budget,
       j.result.assumptions.daily_loss,

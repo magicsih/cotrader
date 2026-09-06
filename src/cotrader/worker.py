@@ -21,6 +21,7 @@ async def compute_job(settings, sessions, job, lock):
                     select(CandleRow)
                     .where(
                         CandleRow.symbol == spec.symbol,
+                        CandleRow.venue == spec.venue,
                         CandleRow.interval == "1m",
                         CandleRow.timestamp >= start,
                         CandleRow.timestamp < end,
@@ -59,6 +60,7 @@ async def compute_job(settings, sessions, job, lock):
                         select(CandleRow)
                         .where(
                             CandleRow.symbol == spec.symbol,
+                            CandleRow.venue == spec.venue,
                             CandleRow.interval == "1m",
                             CandleRow.timestamp < start,
                         )
@@ -90,9 +92,7 @@ async def compute_job(settings, sessions, job, lock):
         nonlocal progress
         progress = value
 
-    risk = job.request.get(
-        "assumptions", {"daily_loss": str(settings.daily_loss_usd), "drawdown": str(settings.drawdown_usd)}
-    )
+    risk = job.request.get("assumptions", settings.risk_for(spec.venue))
     args = dict(daily_loss=D(risk["daily_loss"]), drawdown=D(risk["drawdown"]), stop_requested=stopped.is_set)
     if job.request.get("action") == "revalidate":
         work = asyncio.to_thread(

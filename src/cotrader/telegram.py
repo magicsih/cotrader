@@ -7,6 +7,7 @@ import httpx
 from sqlalchemy import select
 
 from cotrader.db import SingleWriter
+from cotrader.markets import VENUES, currency, portfolio_key
 from cotrader.models import Event, RuntimeState, Strategy, now
 from cotrader.services import approval_digest, enqueue, put_runtime
 
@@ -73,6 +74,8 @@ class TelegramBot:
                             for command, description in (
                                 ("status", "봇 상태와 운용 손익"),
                                 ("account", "토스 실제 계좌 조회"),
+                                ("crypto", "업비트 실제 계좌 조회"),
+                                ("guide", "종목별 시작 가이드"),
                                 ("strategies", "전략 확인과 승인"),
                                 ("pause", "전체 주문 중단"),
                                 ("web", "통계 화면 안내"),
@@ -170,7 +173,7 @@ class TelegramBot:
             return
         if command in {"/start", "/help"}:
             await self.send(
-                "Cotrader\n/status 상태·손익\n/account 실제 계좌 조회\n/strategies 전략·승인\n/pause 모든 주문 중단\n/web 통계·백테스트\n\n전략 예산 안에서 자동 실행합니다. 중단 시 보유분은 매도하지 않습니다."
+                "Cotrader\n/status 상태·손익\n/account 토스 실제 계좌\n/crypto 업비트 실제 계좌\n/guide 시작 가이드\n/strategies 전략·승인\n/pause 모든 주문 중단\n/web 통계·백테스트\n\n전략 예산 안에서 자동 실행합니다. 중단 시 보유분은 매도하지 않습니다."
             )
         elif command == "/account":
             from cotrader.account import account_message, account_view
@@ -182,6 +185,17 @@ class TelegramBot:
                 await put_runtime(
                     session, "telegram_account_reply", {"update_id": update["update_id"], "status": "SENT"}
                 )
+        elif command == "/crypto":
+            from cotrader.account import account_view, crypto_account_message
+
+            async with self.sessions() as session:
+                data = account_view(await session.get(RuntimeState, "upbit_account"))
+            await self.send(crypto_account_message(data))
+        elif command == "/guide":
+            await self.send(
+                "실제 종목의 데이터 수집 → 검증 → 모의매매 순서로 따라가세요.",
+                [[{"text": "사용 가이드 열기", "url": self.settings.public_url + "/guide"}]],
+            )
         elif command == "/web":
             if self.settings.auth_mode == "github":
                 await self.send(
@@ -201,13 +215,17 @@ class TelegramBot:
         elif command == "/status":
             async with self.sessions() as session:
                 status = await session.get(RuntimeState, "engine")
-                rows = [await session.get(RuntimeState, f"portfolio:{mode}") for mode in ("paper", "live")]
+                rows = [
+                    await session.get(RuntimeState, portfolio_key(venue, mode))
+                    for venue in VENUES
+                    for mode in ("paper", "live")
+                ]
             lines = ["Cotrader 상태", str(status.data if status else "실행기 연결 대기")]
             for row in rows:
                 if row:
                     p = row.data
                     lines.append(
-                        f"{p['mode']} · 평가 ${p['equity'] or '확인 불가'} · 비용 ${p['costs']} · 미체결 {p['pending_orders']} · {'중단' if p['halted'] else '대기/운영'}"
+                        f"{p['venue']} {p['mode']} · 평가 {p['equity'] or '확인 불가'} {p['currency']} · 비용 {p['costs']} {p['currency']} · 미체결 {p['pending_orders']} · {'중단' if p['halted'] else '대기/운영'}"
                     )
             await self.send("\n".join(lines))
         elif command == "/strategies":
@@ -224,23 +242,26 @@ class TelegramBot:
                 await self.send("저장된 전략이 없습니다. /web 에서 종목·예산·가격 범위를 먼저 설정하세요.")
             for row in rows:
                 c = row.config
-                details = f"{row.name} · {row.symbol} · {row.mode}\n상태 {row.status}\n예산 ${c['budget']} · 전략 {c['kind']}\n"
+                unit = "개" if row.venue == "upbit" else "주"
+                cur = currency(row.venue)
+                risk = self.settings.risk_for(row.venue)
+                details = f"{row.name} · {row.symbol} · {row.mode}\n상태 {row.status}\n예산 {c['budget']} {cur} · 전략 {c['kind']}\n"
                 if c["kind"] == "grid":
-                    details += f"범위 ${c['lower']}~${c['upper']} · {c['grids']}단계 · {c['spacing']}\n"
+                    details += f"범위 {c['lower']}~{c['upper']} {cur} · {c['grids']}단계 · {c['spacing']}\n"
                     from cotrader.domain import StrategySpec, levels, slot_quantity
 
                     spec = StrategySpec.model_validate(c)
                     prices = levels(spec)
                     details += (
                         "\n".join(
-                            f"${price} → ${prices[i + 1]} · {slot_quantity(spec, price)}주"
+                            f"{price} → {prices[i + 1]} {cur} · {slot_quantity(spec, price)}{unit}"
                             for i, price in enumerate(prices[:-1])
                         )
                         + "\n"
                     )
                     details += f"하락 시 신규 매수 보류: {'사용' if c['signal_gate'] else '사용 안 함'}\n"
                 details += f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']}/매도 {c['rsi_exit']}\n수수료 가정 {c['commission_rate']} · 체결 비용 {c['slippage_bps']}bp\n"
-                details += f"{c['timeframe']}분 신호 · 최대 호가 차이 {c['max_spread_bps']}bp\n손실 기준: 하루 ${self.settings.daily_loss_usd}, 고점 대비 ${self.settings.drawdown_usd}\n전체 세션 · 중단 시 보유 유지\n설정 버전 {row.version}"
+                details += f"{c['timeframe']}분 신호 · 최대 호가 차이 {c['max_spread_bps']}bp\n손실 기준: 하루 {risk['daily_loss']} {cur}, 고점 대비 {risk['drawdown']} {cur}\n전체 세션 · 중단 시 보유 유지\n설정 버전 {row.version}"
                 buttons = [
                     [
                         {
@@ -261,7 +282,7 @@ class TelegramBot:
                     f"telegram:{self.settings.telegram_me}",
                 )
             await self.send(
-                "전체 중단을 접수했습니다. 미체결 주문 취소 결과는 별도로 확인하며 보유 주식은 유지합니다."
+                "전체 중단을 접수했습니다. 미체결 주문 취소 결과는 별도로 확인하며 보유 자산은 유지합니다."
             )
 
     async def notifications(self):

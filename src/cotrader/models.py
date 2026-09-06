@@ -19,6 +19,7 @@ class Base(DeclarativeBase):
 
 
 class Strategy(Base):
+    venue: Mapped[str] = mapped_column(String(12), default="toss", index=True)
     __tablename__ = "strategies"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     name: Mapped[str] = mapped_column(String(100))
@@ -33,6 +34,7 @@ class Strategy(Base):
 
 
 class Intent(Base):
+    venue: Mapped[str] = mapped_column(String(12), default="toss", index=True)
     __tablename__ = "order_intents"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     strategy_id: Mapped[str] = mapped_column(String(36), index=True)
@@ -66,6 +68,7 @@ class Ledger(Base):
 
 
 class AccountState(Base):
+    venue: Mapped[str] = mapped_column(String(12), primary_key=True, default="toss")
     __tablename__ = "account_states"
     mode: Mapped[str] = mapped_column(String(12), primary_key=True)
     capital: Mapped[Decimal] = mapped_column(Numeric(28, 10))
@@ -77,8 +80,11 @@ class AccountState(Base):
 
 
 class CandleRow(Base):
+    venue: Mapped[str] = mapped_column(String(12), default="toss", index=True)
     __tablename__ = "candles"
-    __table_args__ = (UniqueConstraint("symbol", "interval", "timestamp"),)
+    __table_args__ = (
+        UniqueConstraint("venue", "symbol", "interval", "timestamp", name="uq_candle_venue_time"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     symbol: Mapped[str] = mapped_column(String(24), index=True)
     interval: Mapped[str] = mapped_column(String(4))
@@ -111,6 +117,7 @@ class Event(Base):
 
 
 class Snapshot(Base):
+    venue: Mapped[str] = mapped_column(String(12), default="toss", index=True)
     __tablename__ = "snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     mode: Mapped[str] = mapped_column(String(12), index=True)

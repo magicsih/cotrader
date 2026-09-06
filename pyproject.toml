@@ -1,7 +1,7 @@
 [project]
 name = "cotrader"
 version = "0.1.0"
-description = "개인 계좌용 미국 주식 전략 실행 및 검증 도구"
+description = "개인 계좌용 미국 주식·업비트 원화 코인 전략 실행 및 검증 도구"
 requires-python = ">=3.13"
 dependencies = [
   "fastapi>=0.115,<1",

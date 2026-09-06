@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from cotrader.markets import Venue, order_size_valid, price_tick, round_quantity, validate_symbol
 
 D = Decimal
 ZERO = D(0)
@@ -11,9 +13,10 @@ ACTIVE_ORDERS = {"PREPARED", "SENDING", "UNKNOWN", "PENDING", "PARTIAL_FILLED", 
 
 
 class StrategySpec(BaseModel):
+    venue: Venue = "toss"
     symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,23}$")
     kind: Literal["grid", "trend", "rebound"] = "grid"
-    budget: Decimal = Field(gt=0, le=5000)
+    budget: Decimal = Field(gt=0, le=10000000)
     lower: Decimal | None = Field(default=None, gt=0)
     upper: Decimal | None = Field(default=None, gt=0)
     grids: int = Field(default=5, ge=2, le=30)
@@ -32,6 +35,9 @@ class StrategySpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_grid(self):
+        validate_symbol(self.venue, self.symbol)
+        if self.venue == "toss" and self.budget > 5000:
+            raise ValueError("미국 주식의 전략 예산은 최대 5,000 USD입니다")
         if self.fast >= self.slow:
             raise ValueError("단기 평균 기간은 장기 평균 기간보다 작아야 합니다")
         if self.kind == "grid":
@@ -40,29 +46,34 @@ class StrategySpec(BaseModel):
             prices = levels(self)
             if len(set(prices)) != len(prices):
                 raise ValueError("호가 단위 반올림 후 가격선이 중복됩니다")
-            if any(slot_quantity(self, p) < 1 for p in prices[:-1]):
-                raise ValueError("각 가격선에 최소 1주가 필요합니다. 예산을 늘리거나 단계 수를 줄이세요")
+            if any(not order_size_valid(slot_quantity(self, p), p, self.venue) for p in prices[:-1]):
+                raise ValueError(
+                    "가격선마다 주식은 최소 1주, 코인은 최소 5,000원이 필요합니다. 예산을 늘리거나 단계를 줄이세요"
+                )
             minimum_gap = min((b - a) / a for a, b in zip(prices, prices[1:], strict=False))
             if minimum_gap <= self.commission_rate * 2 + self.slippage_bps / D(10000) * 2:
                 raise ValueError("그리드 간격이 왕복 수수료와 가정한 체결 비용보다 좁습니다")
         return self
 
 
-def tick(price: Decimal) -> Decimal:
-    return price.quantize(D("0.0001") if price < 1 else D("0.01"), rounding=ROUND_DOWN)
+def tick(price: Decimal, venue: Venue = "toss") -> Decimal:
+    return price_tick(price, venue)
 
 
 def levels(spec: StrategySpec) -> list[Decimal]:
     if spec.spacing == "arithmetic":
         return [
-            tick(spec.lower + (spec.upper - spec.lower) * D(i) / spec.grids) for i in range(spec.grids + 1)
+            tick(spec.lower + (spec.upper - spec.lower) * D(i) / spec.grids, spec.venue)
+            for i in range(spec.grids + 1)
         ]
     ratio = (spec.upper / spec.lower) ** (D(1) / spec.grids)
-    return [tick(spec.lower * ratio**i) for i in range(spec.grids)] + [tick(spec.upper)]
+    return [tick(spec.lower * ratio**i, spec.venue) for i in range(spec.grids)] + [
+        tick(spec.upper, spec.venue)
+    ]
 
 
 def slot_quantity(spec: StrategySpec, price: Decimal) -> Decimal:
-    return (spec.budget * D("0.98") / spec.grids / price).to_integral_value(rounding=ROUND_DOWN)
+    return round_quantity(spec.budget * D("0.98") / spec.grids / price, spec.venue)
 
 
 def initial_state(budget: Decimal) -> dict:
@@ -215,6 +226,8 @@ def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tu
         ]
         if sellable:
             slot, lot = min(sellable, key=lambda pair: pair[0])
+            if not order_size_valid(D(lot["quantity"]), prices[slot + 1], spec.venue):
+                return None, "보유 잔량의 최소 주문 금액 충족 대기"
             return Decision(
                 "SELL", D(lot["quantity"]), prices[slot + 1], "그리드 익절 가격 도달", slot
             ), "매도 신호"
@@ -259,11 +272,13 @@ def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tu
         sell = values[-1] >= spec.rsi_exit or closes[-1] < slow[-1]
         reason = "RSI 과매도 회복·추세 확인" if not holding else "RSI 회복 완료 또는 추세 이탈"
     if holding and sell:
-        return Decision("SELL", D(state["quantity"]), tick(quote.bid), reason), "매도 신호"
+        if not order_size_valid(D(state["quantity"]), tick(quote.bid, spec.venue), spec.venue):
+            return None, "보유 잔량의 최소 주문 금액 충족 대기"
+        return Decision("SELL", D(state["quantity"]), tick(quote.bid, spec.venue), reason), "매도 신호"
     if not holding and buy:
-        quantity = (D(state["cash"]) * D("0.98") / quote.ask).to_integral_value(rounding=ROUND_DOWN)
-        if quantity >= 1:
-            return Decision("BUY", quantity, tick(quote.ask), reason), "매수 신호"
+        quantity = round_quantity(D(state["cash"]) * D("0.98") / quote.ask, spec.venue)
+        if order_size_valid(quantity, quote.ask, spec.venue):
+            return Decision("BUY", quantity, tick(quote.ask, spec.venue), reason), "매수 신호"
     return None, "매매 조건 대기"
 
 

@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from cotrader.domain import ACTIVE_ORDERS, D, StrategySpec, apply_fill, initial_state
+from cotrader.markets import VENUES, currency, portfolio_key, validate_symbol
 from cotrader.models import AccountState, Command, Event, Intent, Ledger, RuntimeState, Strategy, now
 
 
@@ -14,9 +15,8 @@ def approval_digest(strategy, settings) -> str:
         strategy.version,
         strategy.mode,
         strategy.config,
-        str(settings.capital_usd),
-        str(settings.daily_loss_usd),
-        str(settings.drawdown_usd),
+        str(settings.capital_for(strategy.venue)),
+        settings.risk_for(strategy.venue),
         settings.live_enabled,
         "ALL_SESSIONS_HOLD_ON_STOP",
     ]
@@ -33,26 +33,28 @@ async def put_runtime(session, key, data):
 
 
 async def bootstrap(session, settings):
-    for mode in ("paper", "live"):
-        if not await session.get(AccountState, mode):
-            session.add(
-                AccountState(
-                    mode=mode,
-                    capital=settings.capital_usd,
-                    high_water=settings.capital_usd,
-                    daily_anchor=settings.capital_usd,
+    for venue in VENUES:
+        for mode in ("paper", "live"):
+            if not await session.get(AccountState, {"mode": mode, "venue": venue}):
+                capital = settings.capital_for(venue)
+                session.add(
+                    AccountState(
+                        mode=mode, venue=venue, capital=capital, high_water=capital, daily_anchor=capital
+                    )
                 )
-            )
 
 
 async def create_strategy(session, name: str, spec: StrategySpec, mode: str):
     if mode not in {"paper", "live"}:
         raise ValueError("지원하지 않는 실행 모드입니다")
+    if spec.venue == "upbit" and mode == "live":
+        raise ValueError("업비트는 현재 연구·모의매매·계좌 조회를 지원합니다. 실제 주문은 지원하지 않습니다")
     if len(name) > 100 or not name.strip():
         raise ValueError("전략 이름은 1~100자로 입력하세요")
     row = Strategy(
         name=name,
         symbol=spec.symbol,
+        venue=spec.venue,
         config=spec.model_dump(mode="json"),
         mode=mode,
         state={**initial_state(spec.budget), "funded": False},
@@ -89,18 +91,26 @@ async def process_command(session, command, settings):
         if row.status == "ARCHIVED":
             raise ValueError("종료된 전략은 재개할 수 없습니다. 새 초안을 만드세요")
         spec = StrategySpec.model_validate(row.config)
+        if spec.venue == "upbit" and (row.mode == "live" or not settings.upbit_enabled):
+            raise ValueError("업비트 실제 주문은 비활성이며 모의매매에는 업비트 시세 연결이 필요합니다")
         if row.mode == "live" and not settings.live_enabled:
             raise ValueError("서버에서 실거래 실행을 허용하지 않았습니다")
-        account = await session.get(AccountState, row.mode)
+        account = await session.get(AccountState, {"mode": row.mode, "venue": row.venue})
         if account.halted:
             raise ValueError("포트폴리오가 위험 중단 상태입니다. 기준 재설정 승인이 필요합니다")
         unresolved = await session.scalar(
-            select(Intent).where(Intent.mode == row.mode, Intent.status == "UNKNOWN")
+            select(Intent).where(
+                Intent.mode == row.mode, Intent.venue == row.venue, Intent.status == "UNKNOWN"
+            )
         )
         if unresolved:
             raise ValueError("결과가 확인되지 않은 주문을 먼저 대조해야 합니다")
         others = (
-            await session.scalars(select(Strategy).where(Strategy.id != row.id, Strategy.mode == row.mode))
+            await session.scalars(
+                select(Strategy).where(
+                    Strategy.id != row.id, Strategy.mode == row.mode, Strategy.venue == row.venue
+                )
+            )
         ).all()
         funded = [s for s in others if s.state.get("funded")]
         if any(s.symbol == row.symbol for s in funded):
@@ -134,7 +144,7 @@ async def process_command(session, command, settings):
         session.add(
             Event(
                 kind="pause",
-                message="중단 접수: 대기 주문 취소 결과를 확인합니다. 보유 주식은 유지합니다.",
+                message="중단 접수: 대기 주문 취소 결과를 확인합니다. 보유 자산은 유지합니다.",
                 notify=True,
             )
         )
@@ -160,10 +170,12 @@ async def process_command(session, command, settings):
     elif command.action == "reset_risk":
         if payload.get("confirm") != "RESET_ANCHORS":
             raise ValueError("새 손실 기준으로 재설정한다는 명시적 확인이 필요합니다")
-        account = await session.get(AccountState, payload["mode"])
+        account = await session.get(
+            AccountState, {"mode": payload["mode"], "venue": payload.get("venue", "toss")}
+        )
         if not account:
             raise ValueError("잘못된 실행 모드입니다")
-        snapshot = await session.get(RuntimeState, f"portfolio:{account.mode}")
+        snapshot = await session.get(RuntimeState, portfolio_key(account.venue, account.mode))
         if (
             not snapshot
             or not snapshot.data.get("complete")
@@ -181,11 +193,14 @@ async def process_command(session, command, settings):
             )
         )
     elif command.action == "ingest":
-        import re
         from datetime import datetime
 
-        if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,23}", payload.get("symbol", "")):
-            raise ValueError("미국 종목 심볼을 입력하세요")
+        venue = payload.get("venue", "toss")
+        if venue not in VENUES:
+            raise ValueError("지원하지 않는 시장입니다")
+        validate_symbol(venue, payload.get("symbol", ""))
+        if venue == "upbit" and not settings.upbit_enabled:
+            raise ValueError("업비트 시세 연결이 비활성입니다")
         if payload.get("interval", "1m") not in {"1m", "1d"}:
             raise ValueError("1m 또는 1d만 지원합니다")
         if datetime.fromisoformat(payload["from"]).tzinfo is None:
@@ -251,7 +266,7 @@ async def record_execution(session, intent: Intent, order: dict):
             Event(
                 kind="fill",
                 strategy_id=row.id,
-                message=f"{row.mode} · {row.symbol} {intent.side} {delta_quantity}주 체결",
+                message=f"{row.mode} · {row.symbol} {intent.side} {delta_quantity}{'개' if row.venue == 'upbit' else '주'} 체결",
                 data={
                     "intent_id": intent.id,
                     "quantity": str(delta_quantity),
@@ -276,10 +291,11 @@ async def record_execution(session, intent: Intent, order: dict):
     intent.status = status
 
 
-async def check_risk(session, settings, quotes, trading_day: str):
-    strategies = (await session.scalars(select(Strategy))).all()
+async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
+    risk = settings.risk_for(venue)
+    strategies = (await session.scalars(select(Strategy).where(Strategy.venue == venue))).all()
     for mode in ("paper", "live"):
-        account = await session.get(AccountState, mode)
+        account = await session.get(AccountState, {"mode": mode, "venue": venue})
         funded = [s for s in strategies if s.mode == mode and s.state.get("funded")]
         settled = [s for s in strategies if s.mode == mode and s.state.get("settled")]
         allocated = sum((D(s.config["budget"]) for s in funded), D(0))
@@ -319,7 +335,7 @@ async def check_risk(session, settings, quotes, trading_day: str):
                 account.trading_day, account.daily_anchor = trading_day, value
             account.high_water = max(account.high_water, value)
             daily_loss, dd = account.daily_anchor - value, account.high_water - value
-            if not account.halted and (daily_loss >= settings.daily_loss_usd or dd >= settings.drawdown_usd):
+            if not account.halted and (daily_loss >= D(risk["daily_loss"]) or dd >= D(risk["drawdown"])):
                 account.halted, account.reason = True, "손실 중단 기준 도달 — 주문 취소·보유 유지"
                 for strategy in funded:
                     strategy.status, strategy.reason = "PAUSED", account.reason
@@ -327,19 +343,25 @@ async def check_risk(session, settings, quotes, trading_day: str):
         pending = len(
             (
                 await session.scalars(
-                    select(Intent.id).where(Intent.mode == mode, Intent.status.in_(ACTIVE_ORDERS))
+                    select(Intent.id).where(
+                        Intent.mode == mode, Intent.venue == venue, Intent.status.in_(ACTIVE_ORDERS)
+                    )
                 )
             ).all()
         )
         unresolved = len(
             (
                 await session.scalars(
-                    select(Intent.id).where(Intent.mode == mode, Intent.status.in_(["UNKNOWN", "SENDING"]))
+                    select(Intent.id).where(
+                        Intent.mode == mode, Intent.venue == venue, Intent.status.in_(["UNKNOWN", "SENDING"])
+                    )
                 )
             ).all()
         )
         data = {
             "mode": mode,
+            "venue": venue,
+            "currency": currency(venue),
             "capital": str(account.capital),
             "cash": str(cash),
             "equity": str(value) if complete else None,
@@ -354,7 +376,7 @@ async def check_risk(session, settings, quotes, trading_day: str):
             "halted": account.halted,
             "reason": account.reason,
             "unresolved_orders": unresolved,
-            "daily_loss_limit": str(settings.daily_loss_usd),
-            "drawdown_limit": str(settings.drawdown_usd),
+            "daily_loss_limit": risk["daily_loss"],
+            "drawdown_limit": risk["drawdown"],
         }
-        await put_runtime(session, f"portfolio:{mode}", data)
+        await put_runtime(session, portfolio_key(venue, mode), data)

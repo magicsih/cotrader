@@ -30,3 +30,23 @@ def account_message(data):
         "계좌 전체 현황이며 봇의 전략 예산·운용 손익과 별도입니다.",
     ]
     return "\n".join(lines)
+
+
+def crypto_account_message(data):
+    snapshot = data.get("snapshot")
+    lines = ["업비트 실제 계좌 · 조회 전용"]
+    if data.get("status") != "CONNECTED" or data.get("stale"):
+        lines.append(
+            f"조회 확인 필요: {data.get('error') or data.get('status')} · 아래는 마지막 조회 값입니다"
+        )
+    if snapshot:
+        lines += [
+            f"사용 가능한 원화 {snapshot['cash_available']} KRW",
+            f"주문 등에 묶인 원화 {snapshot['cash_locked']} KRW",
+            f"보유 코인 {len(snapshot['assets'])}종목",
+            f"조회 시각 {snapshot['checked_at']}",
+        ]
+    else:
+        lines.append("확인된 계좌 데이터가 없습니다")
+    lines.append("봇 모의 자금과 별도이며 실제 주문·출금은 실행하지 않습니다")
+    return "\n".join(lines)

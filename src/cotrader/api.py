@@ -15,6 +15,7 @@ from cotrader.auth import require_actor, session_token, telegram_user
 from cotrader.config import Settings
 from cotrader.db import database
 from cotrader.domain import Bar, StrategySpec, levels, slot_quantity
+from cotrader.markets import Venue, currency, portfolio_key, validate_symbol
 from cotrader.models import BacktestJob, CandleRow, Command, Event, Intent, RuntimeState, Snapshot, Strategy
 from cotrader.research import OptimizationOptions
 from cotrader.services import approval_digest, create_strategy, enqueue
@@ -41,6 +42,7 @@ class ResearchInput(BaseModel):
 
 
 class CandleImport(BaseModel):
+    venue: Venue = "toss"
     symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,23}$")
     source: Literal["user", "synthetic"] = "user"
     candles: list[dict] = Field(min_length=3, max_length=20000)
@@ -156,31 +158,37 @@ def create_app(settings: Settings | None = None, sessions_override=None):
         return {"ok": True}
 
     @app.get("/api/status")
-    async def status(_actor: Actor):
+    async def status(_actor: Actor, venue: Venue = "toss"):
         async with sessions() as session:
-            runtime = await session.get(RuntimeState, "engine")
+            runtime = await session.get(RuntimeState, "engine:upbit" if venue == "upbit" else "engine")
             telegram = await session.get(RuntimeState, "telegram")
             return {
                 "engine": serialize(runtime) if runtime else None,
-                "live_enabled": settings.live_enabled,
-                "capital": str(settings.capital_usd),
-                "daily_loss": str(settings.daily_loss_usd),
-                "drawdown": str(settings.drawdown_usd),
-                "market_source": settings.market_source,
+                "live_enabled": settings.live_enabled and venue == "toss",
+                "venue": venue,
+                "currency": currency(venue),
+                "capital": str(settings.capital_for(venue)),
+                "daily_loss": settings.risk_for(venue)["daily_loss"],
+                "drawdown": settings.risk_for(venue)["drawdown"],
+                "market_source": ("upbit" if settings.upbit_enabled else "offline")
+                if venue == "upbit"
+                else settings.market_source,
                 "telegram": serialize(telegram) if telegram else None,
             }
 
     @app.get("/api/account")
-    async def account(_actor: Actor):
+    async def account(_actor: Actor, venue: Venue = "toss"):
         from cotrader.account import account_view
 
         async with sessions() as session:
-            return account_view(await session.get(RuntimeState, "broker_account"))
+            return account_view(
+                await session.get(RuntimeState, "upbit_account" if venue == "upbit" else "broker_account")
+            )
 
     @app.get("/api/portfolio")
-    async def portfolio(_actor: Actor, mode: Literal["paper", "live"] = "paper"):
+    async def portfolio(_actor: Actor, mode: Literal["paper", "live"] = "paper", venue: Venue = "toss"):
         async with sessions() as session:
-            row = await session.get(RuntimeState, f"portfolio:{mode}")
+            row = await session.get(RuntimeState, portfolio_key(venue, mode))
             return serialize(row) if row else None
 
     @app.get("/api/strategies")
@@ -210,7 +218,8 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             "maximum_budget": str(body.spec.budget),
             "mode": body.mode,
             "loss_action": "대기 주문 취소·보유 유지·알림",
-            "sessions": "토스 지원 전체 세션",
+            "sessions": "24시간" if body.spec.venue == "upbit" else "토스 지원 전체 세션",
+            "currency": currency(body.spec.venue),
             "costs": "모의 수수료와 체결 비용은 설정값이며 실제 비용과 다를 수 있습니다",
         }
 
@@ -245,14 +254,14 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             ]
 
     @app.get("/api/orders")
-    async def orders(_actor: Actor, mode: Literal["paper", "live"] = "paper"):
+    async def orders(_actor: Actor, mode: Literal["paper", "live"] = "paper", venue: Venue = "toss"):
         async with sessions() as session:
             return [
                 serialize(row)
                 for row in (
                     await session.scalars(
                         select(Intent)
-                        .where(Intent.mode == mode)
+                        .where(Intent.mode == mode, Intent.venue == venue)
                         .order_by(Intent.created_at.desc())
                         .limit(200)
                     )
@@ -270,12 +279,12 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             ]
 
     @app.get("/api/snapshots")
-    async def snapshots(_actor: Actor, mode: Literal["paper", "live"] = "paper"):
+    async def snapshots(_actor: Actor, mode: Literal["paper", "live"] = "paper", venue: Venue = "toss"):
         async with sessions() as session:
             rows = (
                 await session.scalars(
                     select(Snapshot)
-                    .where(Snapshot.mode == mode)
+                    .where(Snapshot.mode == mode, Snapshot.venue == venue)
                     .order_by(Snapshot.created_at.desc())
                     .limit(500)
                 )
@@ -288,22 +297,26 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             rows = (
                 await session.execute(
                     select(
+                        CandleRow.venue,
                         CandleRow.symbol,
                         CandleRow.interval,
                         CandleRow.source,
                         func.count(),
                         func.min(CandleRow.timestamp),
                         func.max(CandleRow.timestamp),
-                    ).group_by(CandleRow.symbol, CandleRow.interval, CandleRow.source)
+                    ).group_by(CandleRow.venue, CandleRow.symbol, CandleRow.interval, CandleRow.source)
                 )
             ).all()
             return [
-                dict(zip(("symbol", "interval", "source", "count", "first", "last"), row, strict=True))
+                dict(
+                    zip(("venue", "symbol", "interval", "source", "count", "first", "last"), row, strict=True)
+                )
                 for row in rows
             ]
 
     @app.post("/api/datasets/import", status_code=201)
     async def import_candles(body: CandleImport, actor: Actor):
+        validate_symbol(body.venue, body.symbol)
         bars = [Bar.parse(value) for value in body.candles]
         if len({b.at for b in bars}) != len(bars):
             raise ValueError("중복 시각의 봉이 있습니다")
@@ -321,6 +334,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                 exists = await session.scalar(
                     select(CandleRow.id).where(
                         CandleRow.symbol == body.symbol,
+                        CandleRow.venue == body.venue,
                         CandleRow.interval == "1m",
                         CandleRow.timestamp == stamp,
                     )
@@ -330,6 +344,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                 session.add(
                     CandleRow(
                         symbol=body.symbol,
+                        venue=body.venue,
                         interval="1m",
                         timestamp=stamp,
                         data=bar.json(),
@@ -351,10 +366,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             raise ValueError("시작 시각은 종료 시각보다 빨라야 합니다")
         async with sessions.begin() as session:
             payload = body.model_dump(mode="json")
-            payload["assumptions"] = {
-                "daily_loss": str(settings.daily_loss_usd),
-                "drawdown": str(settings.drawdown_usd),
-            }
+            payload["assumptions"] = settings.risk_for(body.spec.venue)
             if body.action == "suggest":
                 payload["optimizer_version"] = 2
             row = BacktestJob(request=payload)
@@ -403,6 +415,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
     if (static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
+    @app.get("/guide")
     @app.get("/")
     async def index():
         if not (static_dir / "index.html").is_file():
