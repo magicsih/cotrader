@@ -140,7 +140,9 @@ def discover(request, datasets, *, progress=None, stop_requested=None):
                 }
             )
     if not candidates:
-        raise ValueError("비교할 실제 데이터가 없습니다. 수집 결과의 실패 사유와 제공 기간을 확인하세요")
+        raise ValueError(
+            "비교할 실제 데이터가 없습니다. " + " · ".join(f"{e['symbol']}: {e['reason']}" for e in excluded)
+        )
     ordered = sorted(candidates, key=lambda c: ranking(c, weight))
     selected = ordered[0]
     # Freeze the winner across all symbols and all families before testing any final period.

@@ -235,6 +235,16 @@ export function Start({
             </label>
           </div>
           {result?.message && <p role="status">{result.message}</p>}
+          {!selected &&
+            !["COLLECTING", "RUNNING", "CANCEL_REQUESTED"].includes(
+              run.status,
+            ) &&
+            run.progress.collections?.map((c: Data) => (
+              <p key={c.symbol}>
+                {c.symbol} · {states[c.status] || c.status} · 신규{" "}
+                {c.count.toLocaleString()}봉 {c.message}
+              </p>
+            ))}
           {selected && (
             <>
               <div className="start-pick">

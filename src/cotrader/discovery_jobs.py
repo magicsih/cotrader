@@ -136,6 +136,14 @@ async def collecting_run(settings, sessions):
                     "FAILED",
                     {"message": "시세 수집 제한 시간을 넘었습니다. 연결 상태를 확인하세요"},
                 )
+                session.add(
+                    Event(
+                        kind="research",
+                        message=f"{row.venue}: 전략 탐색 시세 수집 시간 초과",
+                        data={"discovery_id": row.id},
+                        notify=True,
+                    )
+                )
                 for cid in row.request["commands"].values():
                     c = await session.get(Command, cid, with_for_update=True)
                     if c and c.status in {"QUEUED", "RUNNING"}:
@@ -209,7 +217,7 @@ async def compute_discovery(settings, sessions, row, lock):
                 if current.status == "CANCEL_REQUESTED":
                     stopped.set()
                 else:
-                    current.progress = progress
+                    current.progress = {**current.progress, **progress}
         result = await task
         if stopped.is_set():
             raise ResearchCancelled()
