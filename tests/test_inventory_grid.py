@@ -70,7 +70,7 @@ def test_inventory_is_distributed_without_losing_remainder_or_inventing_cash():
     assert sum((D(lot["cost"]) for lot in state["lots"].values()), D(0)) == s.budget
     assert state["cash"] == "0" and state["realized"] == "0"
     assert D(state["cost_basis"]) != s.inventory_average_price * s.inventory_quantity
-    assert levels(s)[1] * (1 - s.commission_rate) >= s.inventory_average_price
+    assert levels(s)[1] * (1 - s.commission_rate) >= s.inventory_average_price * (1 + s.commission_rate)
     assert decide(s, state, quote(), []) == (None, "보유 코인 매도·재매수 가격 대기")
 
 

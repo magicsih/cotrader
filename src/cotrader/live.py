@@ -30,7 +30,7 @@ def inventory_grid_spec(request, chance, quote):
     if request.first_sell_basis == "average":
         if not average:
             raise ValueError("평균 매수가를 확인할 수 없습니다. 현재가 기준을 선택하세요")
-        target = max(target, average / (1 - commission))
+        target = max(target, average * (1 + commission) / (1 - commission))
     target = price_tick(target, "upbit", ROUND_CEILING)
     lower = price_tick(target / ratio, "upbit", ROUND_CEILING)
     spec = StrategySpec(
