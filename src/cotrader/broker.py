@@ -197,7 +197,13 @@ class TossBroker:
     async def place(self, intent):
         if not self.settings.live_enabled:
             raise BrokerError("live-disabled")
-        return await self.request(
+        if (
+            not intent.quantity.is_finite()
+            or intent.quantity <= 0
+            or intent.quantity != intent.quantity.to_integral_value()
+        ):
+            raise ValueError("토스 실거래는 양의 정수 수량만 지원합니다")
+        result = await self.request(
             "POST",
             "/api/v1/orders",
             group="ORDER",
@@ -208,10 +214,13 @@ class TossBroker:
                 "side": intent.side,
                 "orderType": "LIMIT",
                 "timeInForce": "DAY",
-                "quantity": str(intent.quantity),
+                "quantity": str(int(intent.quantity)),
                 "price": str(intent.price),
             },
         )
+        if not isinstance(result, dict) or not result.get("orderId"):
+            raise BrokerError("invalid-submission", ambiguous=True)
+        return result
 
     async def cancel(self, order_id):
         if not self.settings.live_enabled:

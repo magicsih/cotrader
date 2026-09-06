@@ -167,7 +167,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             telegram = await session.get(RuntimeState, "telegram")
             return {
                 "engine": serialize(runtime) if runtime else None,
-                "live_enabled": settings.live_enabled and venue == "toss",
+                "live_enabled": settings.live_for(venue),
                 "venue": venue,
                 "currency": currency(venue),
                 "capital": str(settings.capital_for(venue)),

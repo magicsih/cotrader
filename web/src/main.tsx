@@ -470,7 +470,7 @@ function App({
               className={mode === "live" ? "selected live" : ""}
               onClick={() => setMode("live")}
             >
-              실거래 기록
+              실거래
             </button>
           </div>
           {authMode !== "local" && (
@@ -505,7 +505,7 @@ function App({
               <button
                 className="primary"
                 onClick={() => setShowForm(true)}
-                disabled={!auth || (venue === "upbit" && mode === "live")}
+                disabled={!auth}
               >
                 <Icon name="plus" />
                 직접 설정
@@ -556,8 +556,10 @@ function App({
           )}
           {venue === "upbit" && (
             <div className="banner">
-              업비트 원화 마켓 · 실제 시세를 이용한 연구·모의매매와 계좌 조회를
-              지원합니다. 실제 주문은 제공하지 않습니다.
+              업비트 원화 마켓 ·{" "}
+              {status.live_enabled
+                ? "실거래 허용. 전략별 점검과 시작 확인 후 자동 주문합니다."
+                : "실거래 잠금. 연구·모의매매·계좌 조회를 사용할 수 있습니다."}
             </div>
           )}
           {(status.market_source === "offline" || !connected) && (
@@ -830,6 +832,38 @@ function App({
                           </button>
                         )}
                       <div className="card-actions">
+                        {s.mode === "paper" && (
+                          <button
+                            className="outline"
+                            disabled={busy}
+                            onClick={() =>
+                              act(async () => {
+                                await api("/strategies", {
+                                  name: `${s.name.slice(0, 90)} · 실거래`,
+                                  mode: "live",
+                                  spec: s.config,
+                                });
+                                setMode("live");
+                                setNotice(
+                                  "실거래 초안을 복사했습니다. 준비 점검 후 설정 확인·시작을 눌러주세요.",
+                                );
+                              })
+                            }
+                          >
+                            실거래 초안 복사
+                          </button>
+                        )}
+                        {s.mode === "live" && s.status !== "RUNNING" && (
+                          <button
+                            className="outline"
+                            disabled={busy}
+                            onClick={() =>
+                              sendCommand("check_live", { strategy_id: s.id })
+                            }
+                          >
+                            실거래 준비 점검
+                          </button>
+                        )}
                         <button
                           className="outline"
                           onClick={() => {
@@ -844,7 +878,10 @@ function App({
                             s.status === "RUNNING" ? "outline" : "primary"
                           }
                           disabled={
-                            busy || (s.mode === "live" && !status.live_enabled)
+                            busy ||
+                            (s.status !== "RUNNING" &&
+                              s.mode === "live" &&
+                              !status.live_enabled)
                           }
                           onClick={() =>
                             act(async () => {
@@ -1091,7 +1128,7 @@ function App({
             <p>{confirm.detail}</p>
             {confirm.action === "resolve" && (
               <label>
-                토스증권 주문 번호
+                거래소 주문 번호
                 <input
                   value={confirm.payload.broker_id}
                   maxLength={128}
@@ -1185,6 +1222,13 @@ function App({
                   체결 비용 {confirm.strategy.config.slippage_bps}bp
                 </p>
                 <p>중단 시 미체결 취소 · 보유 유지</p>
+                {confirm.strategy.mode === "live" && (
+                  <p className="banner danger">
+                    실제 계좌에서 자동으로 매수·매도합니다. 시작 직전 계좌·기존
+                    주문·비용을 다시 점검하며 조건을 충족하지 않으면 시작을
+                    거절합니다.
+                  </p>
+                )}
               </div>
             )}
             <div className="card-actions">
@@ -1280,12 +1324,16 @@ function CryptoAccountPanel({ account }: { account: Data }) {
       <div className="section-heading">
         <h2>업비트 실제 계좌</h2>
         <span className={`badge ${ready ? "success" : "neutral"}`}>
-          {ready ? "조회 전용 연결" : "조회 확인 필요"}
+          {ready
+            ? account.read_only
+              ? "조회 전용 연결"
+              : "계좌 연결"
+            : "조회 확인 필요"}
         </span>
       </div>
       <p>
-        아래 잔액은 실제 계좌이며 봇의 모의 자금과 별도입니다. 주문·입출금은
-        실행하지 않습니다.
+        아래 잔액은 실제 계좌이며 봇의 배정 예산과 별도입니다. 실거래는 전략을
+        확인하고 시작한 경우에만 실행됩니다.
       </p>
       {account.error && (
         <p className="banner danger">

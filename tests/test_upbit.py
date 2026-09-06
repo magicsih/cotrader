@@ -154,11 +154,11 @@ async def test_krw_risk_halt_does_not_halt_usd_portfolio(db):
         assert krw.data["capital"] == "1000000.0000000000"
 
 
-async def test_coin_live_strategy_is_rejected_even_when_stock_live_is_enabled(db):
+async def test_coin_live_draft_can_be_saved_without_starting_it(db):
     _, sessions = db
     async with sessions.begin() as session:
-        with pytest.raises(ValueError, match="실제 주문"):
-            await create_strategy(session, "coin", crypto_spec(), "live")
+        row = await create_strategy(session, "coin", crypto_spec(), "live")
+        assert row.mode == "live" and row.status == "DRAFT" and not row.state["funded"]
 
 
 async def test_coin_paper_strategy_runs_while_stock_market_is_closed(db, monkeypatch):
