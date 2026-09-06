@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cotrader-engine
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: cotrader, role: engine}
+  template:
+    metadata:
+      labels: {app: cotrader, role: engine}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
+      containers:
+        - name: engine
+          image: cotrader
+          args: [engine]
+          envFrom:
+            - configMapRef: {name: cotrader-config}
+            - secretRef: {name: cotrader-database}
+            - secretRef: {name: cotrader-toss}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cotrader-api
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: cotrader, role: api}
+  template:
+    metadata:
+      labels: {app: cotrader, role: api}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
+      containers:
+        - name: api
+          image: cotrader
+          args: [api, --host, "0.0.0.0"]
+          ports: [{containerPort: 8000}]
+          envFrom:
+            - configMapRef: {name: cotrader-config}
+            - secretRef: {name: cotrader-database}
+            - secretRef: {name: cotrader-identity}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: 8000}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: 8000}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cotrader-research
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: cotrader, role: research}
+  template:
+    metadata:
+      labels: {app: cotrader, role: research}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
+      containers:
+        - name: research
+          image: cotrader
+          args: [research]
+          envFrom:
+            - configMapRef: {name: cotrader-config}
+            - secretRef: {name: cotrader-database}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cotrader-api
+spec:
+  selector: {app: cotrader, role: api}
+  ports: [{port: 80, targetPort: 8000}]

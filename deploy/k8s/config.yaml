@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cotrader-config
+data:
+  COTRADER_AUTH_MODE: github
+  COTRADER_PUBLIC_URL: https://trading.example.com
+  COTRADER_MARKET_SOURCE: toss
+  COTRADER_LIVE_ENABLED: "false"
+  COTRADER_ACCOUNT_READS_ENABLED: "true"
+  COTRADER_TELEGRAM_ENABLED: "true"
+  COTRADER_CAPITAL_USD: "5000"
+  COTRADER_DAILY_LOSS_USD: "50"
+  COTRADER_DRAWDOWN_USD: "250"
+  PYTHONDONTWRITEBYTECODE: "1"
