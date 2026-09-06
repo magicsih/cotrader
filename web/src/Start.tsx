@@ -17,6 +17,12 @@ const states: Data = {
   QUEUED: "대기",
   REJECTED: "수집 실패",
 };
+const collectionStates: Data = {
+  ...states,
+  RUNNING: "수집 중",
+  SUCCEEDED: "수집 완료",
+  FAILED: "수집 실패",
+};
 const time = (value: string) =>
   new Date(
     /[Z]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`,
@@ -191,8 +197,8 @@ export function Start({
             <div className="collection-row" key={c.symbol}>
               <strong>{c.symbol}</strong>
               <span>
-                {states[c.status] || c.status} · 신규 {c.count.toLocaleString()}
-                봉
+                {collectionStates[c.status] || c.status} · 신규{" "}
+                {c.count.toLocaleString()}봉
               </span>
               {c.message && <p>{c.message}</p>}
             </div>
@@ -241,7 +247,7 @@ export function Start({
             ) &&
             run.progress.collections?.map((c: Data) => (
               <p key={c.symbol}>
-                {c.symbol} · {states[c.status] || c.status} · 신규{" "}
+                {c.symbol} · {collectionStates[c.status] || c.status} · 신규{" "}
                 {c.count.toLocaleString()}봉 {c.message}
               </p>
             ))}
