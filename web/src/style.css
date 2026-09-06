@@ -657,6 +657,7 @@ main {
   min-height: 48px;
 }
 .card-actions {
+  flex-wrap: wrap;
   display: flex;
   gap: 10px;
   justify-content: flex-end;
