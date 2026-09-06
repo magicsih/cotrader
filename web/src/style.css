@@ -1304,3 +1304,52 @@ summary {
   text-decoration: none;
   margin: 16px 0;
 }
+
+.research-library {
+  margin-bottom: 24px;
+}
+.research-library .choice-list {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.research-library .choice-list label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+}
+.research-library .choice-list input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.validation-periods {
+  margin-top: 18px;
+}
+.button-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.saved-recommendation {
+  border-top: 1px solid #e6e7e2;
+  margin-top: 22px;
+  padding-top: 18px;
+}
+.saved-recommendation small {
+  display: block;
+  margin: 8px 0;
+}
+.research-library details {
+  margin: 16px 0;
+}
+.research-library table small {
+  display: block;
+  margin-top: 6px;
+}

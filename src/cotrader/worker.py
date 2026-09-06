@@ -5,34 +5,84 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from cotrader.db import SingleWriter, database
-from cotrader.domain import Bar, StrategySpec
+from cotrader.domain import Bar, D, StrategySpec
 from cotrader.models import BacktestJob, CandleRow, Event
 from cotrader.research import OptimizationOptions, ResearchCancelled, backtest, optimize_grid
+from cotrader.validation import revalidate
 
 
 async def compute_job(settings, sessions, job, lock):
     spec = StrategySpec.model_validate(job.request["spec"])
-    start = datetime.fromisoformat(job.request["start"]).astimezone(UTC).replace(tzinfo=None)
-    end = datetime.fromisoformat(job.request["end"]).astimezone(UTC).replace(tzinfo=None)
-    async with sessions() as session:
-        rows = (
-            await session.scalars(
-                select(CandleRow)
-                .where(
-                    CandleRow.symbol == spec.symbol,
-                    CandleRow.interval == "1m",
-                    CandleRow.timestamp >= start,
-                    CandleRow.timestamp < end,
+
+    async def load(start, end, limit=100001):
+        async with sessions() as session:
+            return (
+                await session.scalars(
+                    select(CandleRow)
+                    .where(
+                        CandleRow.symbol == spec.symbol,
+                        CandleRow.interval == "1m",
+                        CandleRow.timestamp >= start,
+                        CandleRow.timestamp < end,
+                    )
+                    .order_by(CandleRow.timestamp)
+                    .limit(limit)
                 )
-                .order_by(CandleRow.timestamp)
-                .limit(100001)
+            ).all()
+
+    def stamp(value):
+        return datetime.fromisoformat(value).astimezone(UTC).replace(tzinfo=None)
+
+    segments = []
+    if job.request.get("action") == "revalidate":
+        total = 0
+        for period in job.request["periods"]:
+            start, end = stamp(period["start"]), stamp(period["end"])
+            rows = await load(start, end)
+            total += len(rows)
+            if total > 100000:
+                raise ValueError("재검증은 모든 기간을 합해 100,000봉까지 가능합니다")
+            warmup_size = max(
+                StrategySpec.model_validate(c["spec"]).timeframe
+                * (
+                    max(
+                        StrategySpec.model_validate(c["spec"]).slow,
+                        StrategySpec.model_validate(c["spec"]).rsi_period,
+                    )
+                    + 10
+                )
+                for c in job.request["candidates"]
             )
-        ).all()
-    if len(rows) > 100000:
-        raise ValueError("한 번에 100,000봉까지 검증합니다. 기간을 나누어 요청하세요")
-    bars = [Bar.parse(row.data) for row in rows]
-    sources = sorted({row.source for row in rows})
-    synthetic = "synthetic" in sources
+            async with sessions() as session:
+                warmup_rows = (
+                    await session.scalars(
+                        select(CandleRow)
+                        .where(
+                            CandleRow.symbol == spec.symbol,
+                            CandleRow.interval == "1m",
+                            CandleRow.timestamp < start,
+                        )
+                        .order_by(CandleRow.timestamp.desc())
+                        .limit(warmup_size)
+                    )
+                ).all()
+            segments.append(
+                {
+                    **period,
+                    "bars": [Bar.parse(r.data) for r in rows],
+                    "warmup": [Bar.parse(r.data) for r in reversed(warmup_rows)],
+                    "sources": sorted({r.source for r in [*rows, *warmup_rows]}),
+                }
+            )
+        sources = sorted({source for segment in segments for source in segment["sources"]})
+        synthetic = job.request["source_synthetic"] or "synthetic" in sources
+    else:
+        rows = await load(stamp(job.request["start"]), stamp(job.request["end"]))
+        if len(rows) > 100000:
+            raise ValueError("한 번에 100,000봉까지 검증합니다. 기간을 나누어 요청하세요")
+        bars = [Bar.parse(row.data) for row in rows]
+        sources = sorted({row.source for row in rows})
+        synthetic = "synthetic" in sources
     stopped = threading.Event()
     progress = {"stage": "검증 준비", "percent": 0}
 
@@ -40,10 +90,15 @@ async def compute_job(settings, sessions, job, lock):
         nonlocal progress
         progress = value
 
-    args = dict(
-        daily_loss=settings.daily_loss_usd, drawdown=settings.drawdown_usd, stop_requested=stopped.is_set
+    risk = job.request.get(
+        "assumptions", {"daily_loss": str(settings.daily_loss_usd), "drawdown": str(settings.drawdown_usd)}
     )
-    if job.request.get("action") == "suggest":
+    args = dict(daily_loss=D(risk["daily_loss"]), drawdown=D(risk["drawdown"]), stop_requested=stopped.is_set)
+    if job.request.get("action") == "revalidate":
+        work = asyncio.to_thread(
+            revalidate, job.request, segments, progress=on_progress, stop_requested=stopped.is_set
+        )
+    elif job.request.get("action") == "suggest":
         work = asyncio.to_thread(
             optimize_grid,
             spec,

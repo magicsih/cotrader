@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { ResearchLibrary } from "./ResearchLibrary";
 
 type Data = Record<string, any>;
 type Tab = "overview" | "strategies" | "research" | "orders";
@@ -183,6 +184,7 @@ function App() {
   const [snapshots, setSnapshots] = useState<Data[]>([]);
   const [datasets, setDatasets] = useState<Data[]>([]);
   const [jobs, setJobs] = useState<Data[]>([]);
+  const [saved, setSaved] = useState<Data[]>([]);
   const [commands, setCommands] = useState<Data[]>([]);
   const [auth, setAuth] = useState(false);
   const [authMode, setAuthMode] = useState("");
@@ -226,6 +228,7 @@ function App() {
       api("/backtests"),
       api("/commands"),
       api("/account"),
+      api("/recommendations"),
     ]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
@@ -237,6 +240,7 @@ function App() {
     setJobs(values[7]);
     setCommands(values[8]);
     setAccount(values[9]);
+    setSaved(values[10]);
   }, [auth, mode]);
 
   const showError = useCallback((e: Error) => {
@@ -781,19 +785,33 @@ function App() {
             </>
           )}
           {tab === "research" && (
-            <Research
-              busy={busy}
-              datasets={datasets}
-              strategies={strategies}
-              selected={selected}
-              jobs={jobs}
-              act={act}
-              onResult={async (id) => setResult(await api(`/backtests/${id}`))}
-              onAdopt={(spec) => {
-                setSelected({ config: spec, suggested: true });
-                setShowForm(true);
-              }}
-            />
+            <>
+              <Research
+                busy={busy}
+                datasets={datasets}
+                strategies={strategies}
+                selected={selected}
+                jobs={jobs}
+                act={act}
+                onResult={async (id) =>
+                  setResult(await api(`/backtests/${id}`))
+                }
+                onAdopt={(spec) => {
+                  setSelected({ config: spec, suggested: true });
+                  setShowForm(true);
+                }}
+              />
+              <ResearchLibrary
+                jobs={jobs}
+                datasets={datasets}
+                saved={saved}
+                busy={busy}
+                request={api}
+                act={act}
+                money={money}
+                when={when}
+              />
+            </>
           )}
           {tab === "orders" && (
             <>
@@ -1963,7 +1981,9 @@ function Research({
                     ? job.request.optimizer_version
                       ? "그리드 수익 탐색"
                       : "그리드 설정안"
-                    : kindName[job.request.spec.kind]}
+                    : job.request.action === "revalidate"
+                      ? "기간별 재검증"
+                      : kindName[job.request.spec.kind]}
                 </strong>
                 <small>{when(job.created_at)}</small>
               </div>
@@ -2029,6 +2049,7 @@ function Research({
               <OptimizationResult result={job.result} onAdopt={onAdopt} />
             )}
             {!job.result.optimizer_version &&
+              !job.result.validation_version &&
               job.result.candidates?.map((candidate: Data, i: number) => (
                 <div className="candidate" key={i}>
                   <div>

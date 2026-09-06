@@ -80,6 +80,9 @@ def create_app(settings: Settings | None = None, sessions_override=None):
     from cotrader.github_auth import github_routes
 
     app.include_router(github_routes(settings, sessions))
+    from cotrader.research_routes import research_routes
+
+    app.include_router(research_routes(sessions, serialize))
 
     @app.middleware("http")
     async def headers(request, call_next):
@@ -348,6 +351,10 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             raise ValueError("시작 시각은 종료 시각보다 빨라야 합니다")
         async with sessions.begin() as session:
             payload = body.model_dump(mode="json")
+            payload["assumptions"] = {
+                "daily_loss": str(settings.daily_loss_usd),
+                "drawdown": str(settings.drawdown_usd),
+            }
             if body.action == "suggest":
                 payload["optimizer_version"] = 2
             row = BacktestJob(request=payload)

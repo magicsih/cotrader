@@ -1,6 +1,6 @@
 # Kubernetes 배포와 운영 인수
 
-**이번 작업에서는 배포하지 않는다.** 이 문서는 나중에 승인된 배포 작업에서 사용하는 절차다.
+배포는 운영자의 승인된 환경에서 진행한다. 기본 설정은 실거래 비활성이며, 배포 승인은 실제 주문 시작 승인을 대신하지 않는다.
 
 ## 실행 구조
 
@@ -35,7 +35,7 @@ Toss 키는 engine에만, Telegram 토큰과 세션 서명은 api에만 주입�
 ## 실행 순서
 
 1. 빌드·Python 테스트·MySQL 통합 테스트·웹뷰 빌드를 통과시킨다. `kubectl kustomize deploy/k8s`로 출력물을 검토한다.
-2. 승인된 원격 저장소와 이미지 registry 경로를 확정하고 이미지를 게시한다. `REPLACE_WITH_VERIFIED_COMMIT` 두 곳을 실제 검증된 버전으로 바꾼다. 버전 문자열 그대로는 배포할 수 없다.
+2. `main`에 반영된 커밋은 CI 테스트·양쪽 아키텍처 빌드를 통과한 후 GitHub Container Registry에 `sha-<commit>` 이미지로 게시된다. PR에서는 게시하지 않는다. 처음 생성된 GitHub 패키지는 private이므로 공개 소스만 포함함을 검증한 후 패키지를 public으로 설정하고 비인증 이미지 조회를 확인한다. CI 요약에 기록된 digest로 운영 이미지를 고정한다. 승인된 원격 저장소와 이미지 registry 경로를 확정하고 이미지를 게시한다. `REPLACE_WITH_VERIFIED_COMMIT` 두 곳을 실제 검증된 버전으로 바꾼다. 버전 문자열 그대로는 배포할 수 없다.
 3. DB·Secret·DNS·백업 준비를 완료한다. Secret 동기화는 값이 출력되지 않는 승인된 운영 경로를 사용한다.
 4. `deploy/migration-job.yaml`의 일회성 마이그레이션을 실행·확인한다. 진행 중인 engine과 동시에 스키마를 변경하지 않는다.
 5. `COTRADER_LIVE_ENABLED=false`를 확인하고 세 역할을 배포한다. API와 DB 연결, GitHub 본인 인증, 시세·캘린더·수집을 확인한다.

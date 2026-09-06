@@ -127,6 +127,18 @@ class BacktestJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Recommendation(Base):
+    __tablename__ = "recommendations"
+    __table_args__ = (UniqueConstraint("job_id", "candidate_id", name="uq_recommendation_source"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(100))
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    candidate_id: Mapped[str] = mapped_column(String(64))
+    evidence: Mapped[dict] = mapped_column(JSON)
+    strategy_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class RuntimeState(Base):
     __tablename__ = "runtime_state"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
