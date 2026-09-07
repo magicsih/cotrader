@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy import select
 
 from cotrader.db import SingleWriter
-from cotrader.markets import VENUES, currency, is_upbit, portfolio_key
+from cotrader.markets import UPBIT_CAUTION_LABELS, VENUES, currency, is_upbit, portfolio_key
 from cotrader.models import Event, RuntimeState, Strategy, now
 from cotrader.services import approval_digest, enqueue, put_runtime
 
@@ -264,6 +264,10 @@ class TelegramBot:
                     details += f"하락 시 신규 매수 보류: {'사용' if c['signal_gate'] else '사용 안 함'}\n"
                 details += f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']}/매도 {c['rsi_exit']}\n수수료 가정 {c['commission_rate']} · 체결 비용 {c['slippage_bps']}bp\n"
                 details += f"{c['timeframe']}분 신호 · 최대 호가 차이 {c['max_spread_bps']}bp\n손실 기준: 하루 {risk['daily_loss']} {cur}, 고점 대비 {risk['drawdown']} {cur}\n전체 세션 · 중단 시 보유 유지\n설정 버전 {row.version}"
+                if is_upbit(row.venue):
+                    allowed = c.get("allowed_market_cautions", [])
+                    names = " · ".join(UPBIT_CAUTION_LABELS.get(name, name) for name in allowed)
+                    details += f"\n주의 발생 시에도 거래 허용: {names or '없음 — 모두 차단'}"
                 buttons = [
                     [
                         {

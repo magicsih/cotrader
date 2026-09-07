@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from cotrader.markets import (
+    UpbitCaution,
     Venue,
     currency,
     is_upbit,
@@ -30,6 +31,7 @@ class StrategySpec(BaseModel):
     inventory_average_price: Decimal | None = Field(default=None, ge=0)
     inventory_average_currency: str | None = Field(default=None, pattern=r"^(KRW|USDT)$")
     execution_policy: Literal["trigger_limit", "maker_only"] = "trigger_limit"
+    allowed_market_cautions: tuple[UpbitCaution, ...] = ()
     lower: Decimal | None = Field(default=None, gt=0)
     upper: Decimal | None = Field(default=None, gt=0)
     grids: int = Field(default=5, ge=2, le=30)
@@ -49,6 +51,9 @@ class StrategySpec(BaseModel):
     @model_validator(mode="after")
     def validate_grid(self):
         validate_symbol(self.venue, self.symbol)
+        if self.allowed_market_cautions and not is_upbit(self.venue):
+            raise ValueError("주의 항목 허용은 업비트 전략에서만 설정할 수 있습니다")
+        self.allowed_market_cautions = tuple(sorted(set(self.allowed_market_cautions)))
         if self.execution_policy == "maker_only" and not (
             is_upbit(self.venue) and self.kind == "grid" and self.inventory_quantity
         ):

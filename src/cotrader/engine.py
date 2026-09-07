@@ -163,7 +163,7 @@ class Engine:
                         "다른 종목의 대기 주문과 실제 계좌·체결 장부가 다릅니다. 대조 후 다시 점검하세요"
                     )
             markets = await self.upbit.markets()
-            if not market_eligible(markets.get(spec.symbol)):
+            if not market_eligible(markets.get(spec.symbol), spec.allowed_market_cautions):
                 raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
             chance = await self.upbit.chance(spec.symbol)
             cash, sellable, quantity = upbit_policy(
@@ -285,7 +285,7 @@ class Engine:
         ):
             raise ValueError("미체결·미확인 주문 대조가 끝난 후 준비하세요")
         markets = await self.upbit.markets()
-        if not market_eligible(markets.get(request.symbol)):
+        if not market_eligible(markets.get(request.symbol), request.allowed_market_cautions):
             raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
         chance = await self.upbit.chance(request.symbol)
         quotes = await self.upbit.orderbooks([request.symbol])
@@ -954,7 +954,7 @@ class Engine:
                 eligible = stock_eligible(stock)
                 if is_upbit(strategy.venue):
                     market = self.upbit_markets.get(strategy.symbol)
-                    eligible = market_eligible(market)
+                    eligible = market_eligible(market, spec.allowed_market_cautions)
                 if not eligible:
                     strategy.reason = "지원 종목·거래 상태 확인 필요"
                     continue
@@ -1138,7 +1138,10 @@ class Engine:
                                     "메이커 전용 가격·자전 체결 방지 조건 대기",
                                 )
                             return
-                    if not market_eligible(self.upbit_markets.get(intent.symbol)):
+                    if not market_eligible(
+                        self.upbit_markets.get(intent.symbol),
+                        StrategySpec.model_validate(strategy.config).allowed_market_cautions,
+                    ):
                         raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
                     if intent.side == "BUY" and intent.price * intent.quantity * (
                         1 + D(strategy.config["commission_rate"])

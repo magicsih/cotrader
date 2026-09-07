@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from cotrader.domain import ACTIVE_ORDERS, D, StrategySpec, apply_fill, funded_state, initial_state
+from cotrader.live import MarketCautionsRequest
 from cotrader.markets import VENUES, asset_key, currency, is_upbit, portfolio_key, validate_symbol
 from cotrader.models import AccountState, Command, Event, Intent, Ledger, RuntimeState, Strategy, now
 
@@ -82,6 +83,7 @@ async def enqueue(session, command_id: str, action: str, payload: dict, actor: s
         "archive",
         "check_live",
         "prepare_inventory",
+        "set_market_cautions",
     }:
         raise ValueError("지원하지 않는 명령입니다")
     command = Command(id=command_id, action=action, payload=payload, actor=actor)
@@ -162,6 +164,41 @@ async def process_command(session, command, settings, *, live_checked=False):
                 kind="pause",
                 message="중단 접수: 대기 주문 취소 결과를 확인합니다. 보유 자산은 유지합니다.",
                 notify=True,
+            )
+        )
+    elif command.action == "set_market_cautions":
+        request = MarketCautionsRequest.model_validate(payload)
+        row = await session.get(Strategy, request.strategy_id)
+        if not row or not is_upbit(row.venue):
+            raise ValueError("주의 설정을 변경할 업비트 전략이 없습니다")
+        if request.version != row.version or request.approval != approval_digest(row, settings):
+            raise ValueError("전략 설정이 변경되었습니다. 최신 주의 설정을 다시 확인하세요")
+        if row.status not in {"DRAFT", "PAUSED"}:
+            raise ValueError("주의 설정은 승인 대기 또는 중단된 전략에서 변경할 수 있습니다")
+        if await session.scalar(
+            select(Intent.id).where(Intent.strategy_id == row.id, Intent.status.in_(ACTIVE_ORDERS))
+        ):
+            raise ValueError("이 전략의 미체결·미확인 주문 대조가 끝난 후 주의 설정을 변경하세요")
+        spec = StrategySpec.model_validate(
+            {
+                **row.config,
+                "allowed_market_cautions": request.allowed_market_cautions,
+            }
+        )
+        previous = row.config.get("allowed_market_cautions", [])
+        row.config = spec.model_dump(mode="json")
+        row.version += 1
+        session.add(
+            Event(
+                kind="audit",
+                strategy_id=row.id,
+                message="전략별 주의 항목 허용 설정 변경",
+                data={
+                    "actor": command.actor,
+                    "version": row.version,
+                    "previous": previous,
+                    "allowed_market_cautions": row.config["allowed_market_cautions"],
+                },
             )
         )
     elif command.action == "archive":

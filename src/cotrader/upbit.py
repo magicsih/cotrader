@@ -15,6 +15,7 @@ import httpx
 from cotrader.broker import BrokerError
 from cotrader.domain import D, Quote
 from cotrader.markets import (
+    UPBIT_CAUTION_LABELS,
     currency,
     is_upbit,
     order_size_valid,
@@ -25,14 +26,19 @@ from cotrader.markets import (
 )
 
 
-def market_eligible(market):
-    event = (market or {}).get("market_event", {})
+def market_eligible(market, allowed_cautions=()):
+    event = market.get("market_event") if isinstance(market, dict) else None
+    if not isinstance(event, dict):
+        return False
     caution = event.get("caution")
     return (
         event.get("warning") is False
         and isinstance(caution, dict)
         and bool(caution)
-        and all(value is False for value in caution.values())
+        and set(allowed_cautions) <= UPBIT_CAUTION_LABELS.keys()
+        and all(
+            value is False or (value is True and name in allowed_cautions) for name, value in caution.items()
+        )
     )
 
 
