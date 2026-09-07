@@ -20,7 +20,13 @@ from cotrader.domain import (
     levels,
     slot_quantity,
 )
-from cotrader.live import InventoryGridRequest, amount, inventory_grid_spec, upbit_policy
+from cotrader.live import (
+    InventoryGridRequest,
+    amount,
+    inventory_grid_spec,
+    pending_order_matches,
+    upbit_policy,
+)
 from cotrader.markets import (
     UPBIT_VENUES,
     VENUES,
@@ -104,13 +110,6 @@ class Engine:
         if session is None:
             async with self.sessions() as read_session:
                 return await self.check_live_start(strategy, read_session)
-        pending = await session.scalar(
-            select(Intent.id).where(
-                Intent.venue.in_(UPBIT_VENUES if is_upbit(strategy.venue) else [strategy.venue]),
-                Intent.mode == "live",
-                Intent.status.in_(ACTIVE_ORDERS),
-            )
-        )
         intents = (
             await session.scalars(
                 select(Intent).where(
@@ -119,7 +118,15 @@ class Engine:
                 )
             )
         ).all()
-        if pending:
+        pending = [row for row in intents if row.status in ACTIVE_ORDERS]
+        if any(
+            not is_upbit(strategy.venue)
+            or asset_key(row.venue, row.symbol) == asset_key(strategy.venue, spec.symbol)
+            or row.status not in {"PENDING", "PARTIAL_FILLED"}
+            or not row.broker_id
+            or not row.costs_final
+            for row in pending
+        ):
             raise ValueError("기존 실거래 미체결·미확인 주문의 대조가 끝난 후 시작하세요")
         owned = {r.broker_id for r in intents if r.broker_id}
         if strategy.venue == "toss":
@@ -139,6 +146,22 @@ class Engine:
         else:
             if not self.settings.upbit_enabled:
                 raise ValueError("업비트 연결이 필요합니다")
+            orders = await self.upbit.orders()
+            open_ids = {order["orderId"] for order in orders}
+            for intent in pending:
+                owner = await session.get(Strategy, intent.strategy_id)
+                if (
+                    not owner
+                    or owner.status != "RUNNING"
+                    or owner.mode != "live"
+                    or not owner.state.get("funded")
+                    or (owner.venue, owner.symbol) != (intent.venue, intent.symbol)
+                    or intent.broker_id not in open_ids
+                    or not pending_order_matches(intent, await self.upbit.order(intent.broker_id))
+                ):
+                    raise ValueError(
+                        "다른 종목의 대기 주문과 실제 계좌·체결 장부가 다릅니다. 대조 후 다시 점검하세요"
+                    )
             markets = await self.upbit.markets()
             if not market_eligible(markets.get(spec.symbol)):
                 raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
@@ -146,7 +169,6 @@ class Engine:
             cash, sellable, quantity = upbit_policy(
                 chance, spec.symbol, spec.commission_rate, maker_only=spec.execution_policy == "maker_only"
             )
-            orders = await self.upbit.orders()
         if any(
             asset_key(strategy.venue, o["symbol"]) == asset_key(strategy.venue, spec.symbol)
             and o["orderId"] not in owned

@@ -94,6 +94,43 @@ def amount(value):
     return number
 
 
+def pending_order_matches(intent, order):
+    """Read-only evidence check; never reconcile or invent missing execution data."""
+    try:
+        execution = order["execution"]
+        return (
+            bool(intent.broker_id)
+            and intent.costs_final
+            and intent.status in {"PENDING", "PARTIAL_FILLED"}
+            and (
+                order["orderId"],
+                order["clientOrderId"],
+                order["symbol"],
+                order["side"],
+                amount(order["quantity"]),
+                amount(order["price"]),
+                order["status"],
+                amount(execution["filledQuantity"]),
+                amount(execution["filledAmount"]),
+                amount(execution["commission"]) + amount(execution["tax"]),
+            )
+            == (
+                intent.broker_id,
+                intent.id,
+                intent.symbol,
+                intent.side,
+                intent.quantity,
+                intent.price,
+                intent.status,
+                intent.filled_quantity,
+                intent.filled_amount,
+                intent.costs,
+            )
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
+
 def upbit_policy(chance, symbol, commission_rate, *, side=None, total=None, maker_only=False):
     market = chance["market"]
     venue = upbit_venue(symbol)
