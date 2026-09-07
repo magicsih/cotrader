@@ -68,6 +68,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -98,3 +100,62 @@ jobs:
           IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: echo "$IMAGE_REPOSITORY@$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: vzyx-cluster
+    steps:
+      - name: Install pinned kubectl
+        env:
+          KUBECTL_VERSION: v1.35.8
+          KUBECTL_SHA256: 874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$RUNNER_TEMP/bin"
+          curl -fsSLo "$RUNNER_TEMP/bin/kubectl" \
+            "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          echo "$KUBECTL_SHA256  $RUNNER_TEMP/bin/kubectl" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Write kubeconfig and mask the cluster endpoint
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$RUNNER_TEMP/kube"
+          printf '%s' "$KUBECONFIG_B64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/kube/config"
+          chmod 600 "$RUNNER_TEMP/kube/config"
+          server=$(KUBECONFIG="$RUNNER_TEMP/kube/config" \
+            kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          host=${server#*://}
+          host=${host%%:*}
+          echo "::add-mask::$server"
+          echo "::add-mask::$host"
+          for address in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
+            echo "::add-mask::$address"
+          done
+          echo "KUBECONFIG=$RUNNER_TEMP/kube/config" >> "$GITHUB_ENV"
+      - name: Roll out the published digest
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "publish job did not report an image digest" >&2; exit 1 ;;
+          esac
+          for name in cotrader-api cotrader-research cotrader-engine; do
+            kubectl -n cotrader set image "deployment/$name" "*=$IMAGE"
+            kubectl -n cotrader rollout status "deployment/$name" --timeout=10m
+          done
+      - name: Report the running workloads
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          kubectl -n cotrader get deployment \
+            -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas \
+            >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n cotrader get pods --no-headers -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount
