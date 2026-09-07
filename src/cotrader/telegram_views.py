@@ -14,6 +14,7 @@ COMMANDS = (
     ("pocket", "코트레이더 포켓 잔고"),
     ("toss", "토스증권 잔고와 보유 종목"),
     ("orders", "봇의 미체결·확인 필요 주문"),
+    ("profit", "마켓별·전체 합산 운용 수익"),
     ("strategies", "전략 상세·시작·중단"),
     ("research", "토스증권 전략 발굴 결과"),
     ("status", "실행 상태와 운용 손익"),
@@ -123,6 +124,7 @@ def menu():
     ], [
         [button("◈ 코트레이더 포켓", "nav:pocket:0"), button("토스증권", "nav:toss:0")],
         [button("미체결 주문", "nav:orders:0"), button("전략 관리", "nav:strategies:0")],
+        [button("운용 수익 · 전체 합산", "nav:profit:0")],
         [button("토스 전략 발굴", "nav:research:0"), button("운영 상태", "nav:status:0")],
         [button("웹 화면", "nav:web:0"), button("사용 방법", "nav:help:0")],
     ]
@@ -248,7 +250,91 @@ def status(engine, upbit, portfolios):
                     f"미체결 {p.get('pending_orders', 0)}건 · {'손실 기준으로 중단' if p.get('halted') else '운용 가능'}"
                 ),
             ]
-    return blocks, nav("status")
+    return blocks, [[button("마켓별·합산 운용 수익", "nav:profit:0")]] + nav("status")
+
+
+def profit(report):
+    unit = report["base_currency"]
+    total = report["total"]
+    blocks = [
+        heading(f"운용 수익 · {'실거래' if report['mode'] == 'live' else '모의'}"),
+        paragraph("봇 운용 시작 이후 누적 손익 · 보유 편입 당시 평가 기준가부터 집계"),
+        heading(f"전체 합산 · {unit}"),
+        table(
+            ["항목", unit],
+            [
+                [label, number(total[key], 2)]
+                for label, key in (
+                    ("비용 후 총손익", "total_net"),
+                    ("비용 후 실현손익", "realized_net"),
+                    ("평가손익", "unrealized"),
+                    ("누적 비용", "costs"),
+                )
+            ],
+        ),
+    ]
+    if report["issues"]:
+        blocks.append(paragraph("⚠ 합산 확인 필요\n" + "\n".join(report["issues"])))
+    blocks.append(
+        table(
+            ["마켓", "원래 통화 순손익", f"{unit} 환산"],
+            [
+                [
+                    market["label"],
+                    f"{number(market['metrics']['total_net'], 4)} {market['currency']}",
+                    number(market["converted"]["total_net"] if market["converted"] else None, 2),
+                ]
+                for market in report["markets"]
+            ],
+        )
+    )
+    for market in report["markets"]:
+        metrics = market["metrics"]
+        blocks.append(
+            {
+                "type": "details",
+                "summary": f"{market['label']} · {market['status_label']}",
+                "blocks": [
+                    table(
+                        ["항목", market["currency"]],
+                        [
+                            [label, number(metrics[key], 4)]
+                            for label, key in (
+                                ("실현손익 · 비용 전", "realized_gross"),
+                                ("누적 비용", "costs"),
+                                ("비용 후 실현손익", "realized_net"),
+                                ("평가손익", "unrealized"),
+                                ("비용 후 총손익", "total_net"),
+                            )
+                        ],
+                    ),
+                    footer(f"집계 {when(market['checked_at'])} · 갱신이 필요하면 마지막 기록을 표시합니다."),
+                ],
+            }
+        )
+    blocks.append(
+        {
+            "type": "details",
+            "summary": "환산 기준과 적용 환율",
+            "blocks": [
+                paragraph(
+                    "누적 손익을 현재 참고 환율로 환산합니다. 보유 기간의 환차손익이나 실제 환전 비용을 계산한 값은 아닙니다. USD와 USDT를 1:1로 취급하지 않습니다."
+                ),
+                *[
+                    paragraph(
+                        f"{rate['source'] or rate['currency'] + '/KRW'}\n1 {rate['currency']} = {number(rate['rate'], 4)} KRW\n조회 {when(rate['checked_at'])} · 유효 종료 {when(rate['valid_until'])}"
+                    )
+                    for rate in report["fx"]
+                ],
+            ],
+        }
+    )
+    blocks.append(
+        footer(
+            "봇 원장의 손익입니다. 계좌 전체 손익·입출금·배당·리워드는 포함하지 않습니다.\n순손익 = 실현손익 − 기록 비용 + 평가손익. 모의 운용은 합산하지 않습니다."
+        )
+    )
+    return blocks, nav("profit")
 
 
 def strategies(rows, page=0):

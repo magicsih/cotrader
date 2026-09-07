@@ -4,6 +4,7 @@ import "./style.css";
 import { ResearchLibrary } from "./ResearchLibrary";
 import { Start } from "./Start";
 import { Guide } from "./Guide";
+import { ProfitPanel, ProfitReport } from "./ProfitPanel";
 import {
   MarketCautionFields,
   MarketCautionSummary,
@@ -237,6 +238,7 @@ function App({
   const [status, setStatus] = useState<Data>({});
   const [account, setAccount] = useState<Data>({});
   const [portfolio, setPortfolio] = useState<Data | null>(null);
+  const [profit, setProfit] = useState<ProfitReport | null>(null);
   const [strategies, setStrategies] = useState<Data[]>([]);
   const [orders, setOrders] = useState<Data[]>([]);
   const [events, setEvents] = useState<Data[]>([]);
@@ -294,9 +296,11 @@ function App({
       api(`/account?venue=${venue}`),
       api("/recommendations"),
       api(`/discoveries?venue=${venue}`),
+      api(`/profit?mode=${mode}&base_currency=KRW`),
     ]);
     if (sequence !== refreshSequence.current) return;
     setDiscoveries(values[11]);
+    setProfit(values[12]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
     setStrategies(values[2].filter((row: Data) => row.venue === venue));
@@ -654,6 +658,7 @@ function App({
           )}
           {tab === "overview" && (
             <>
+              <ProfitPanel report={profit} />
               <AccountPanel
                 account={account}
                 telegram={status.telegram}

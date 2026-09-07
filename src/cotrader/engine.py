@@ -93,6 +93,7 @@ class Engine:
         self.calendar = {}
         self.stocks = {}
         self.stream_task = None
+        self.fx_task = None
         self.stream_symbols = None
         self.refresh = True
         self.last_market_refresh = datetime.min.replace(tzinfo=UTC)
@@ -389,6 +390,11 @@ class Engine:
                     await bootstrap(session, self.settings)
                     for row in (await session.scalars(select(Strategy))).all():
                         row.state = {**row.state, "last_mid": None, "last_bar": None}
+                from cotrader.profit import fx_loop
+
+                self.fx_task = asyncio.create_task(
+                    fx_loop(self.settings, self.broker, self.upbit, self.sessions)
+                )
                 while True:
                     await lock.verify()
                     try:
@@ -407,6 +413,10 @@ class Engine:
                         LOG.warning("broker unavailable: %s", exc.code)
                     await asyncio.sleep(1)
         finally:
+            if self.fx_task:
+                self.fx_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.fx_task
             if self.stream_task:
                 self.stream_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

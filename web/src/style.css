@@ -1862,3 +1862,44 @@ input[type="checkbox"] {
     justify-content: center;
   }
 }
+.profit-panel .metrics {
+  margin: 20px 0;
+}
+.profit-panel .metric strong {
+  font-size: 26px;
+  overflow-wrap: anywhere;
+}
+.profit-panel [data-trend="up"] {
+  color: #b53637;
+}
+.profit-panel [data-trend="down"] {
+  color: #3267a4;
+}
+.profit-panel details {
+  border-top: 1px solid var(--line, #e1e6eb);
+  padding: 14px 0;
+}
+.profit-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.profit-panel details p,
+.profit-panel > p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.profit-panel .profit-notice {
+  color: #9b4b00;
+}
+.profit-breakdown {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+.profit-breakdown dt {
+  font-size: 13px;
+}
+.profit-breakdown dd {
+  margin: 5px 0 0;
+  font-weight: 600;
+}

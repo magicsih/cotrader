@@ -27,6 +27,7 @@ from cotrader.models import (
     Snapshot,
     Strategy,
 )
+from cotrader.profit import ReportCurrency, profit_summary
 from cotrader.research import OptimizationOptions
 from cotrader.services import approval_digest, create_strategy, enqueue
 
@@ -208,6 +209,13 @@ def create_app(settings: Settings | None = None, sessions_override=None):
         async with sessions() as session:
             row = await session.get(RuntimeState, portfolio_key(venue, mode))
             return serialize(row) if row else None
+
+    @app.get("/api/profit")
+    async def profit(
+        _actor: Actor, mode: Literal["paper", "live"] = "live", base_currency: ReportCurrency = "KRW"
+    ):
+        async with sessions() as session:
+            return await profit_summary(session, mode, base_currency)
 
     @app.get("/api/strategies")
     async def strategies(_actor: Actor):

@@ -13,6 +13,7 @@ from cotrader.db import SingleWriter
 from cotrader.domain import ACTIVE_ORDERS
 from cotrader.markets import VENUES, portfolio_key
 from cotrader.models import Command, DiscoveryRun, Event, Intent, RuntimeState, Strategy, now
+from cotrader.profit import profit_summary
 from cotrader.services import approval_digest, enqueue, put_runtime
 
 LOG = logging.getLogger(__name__)
@@ -163,6 +164,8 @@ class TelegramBot:
                 key = "upbit_account" if name == "pocket" else "broker_account"
                 data = account_view(await session.get(RuntimeState, key))
                 blocks, buttons = getattr(view, name)(data, page)
+            elif name == "profit":
+                blocks, buttons = view.profit(await profit_summary(session))
             elif name == "status":
                 blocks, buttons = view.status(
                     await session.get(RuntimeState, "engine"),

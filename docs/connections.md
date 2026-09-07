@@ -54,7 +54,7 @@ uv run cotrader research
 
 공개 시세는 키 없이 조회한다. 비공개 계좌·주문 조회는 HS512 JWT로 서명한다. `COTRADER_UPBIT_LIVE_ENABLED=false`와 `COTRADER_UPBIT_USDT_LIVE_ENABLED=false`에서는 실제 주문·취소를 거절하며, 준비 점검의 `/v1/orders/test`는 실제 주문 없이 사용할 수 있다. 주문·취소 허용은 서버 설정과 API 키 자체의 권한이 모두 필요하다. 출금 경로는 제공하지 않는다. 계좌 값은 **시장 선택 → 업비트 코인 → 포트폴리오**와 Telegram `/pocket` 또는 `/crypto`에서 조회하며 로그인과 본인 대화방 제한이 적용된다.
 
-`KRW-BTC`, `KRW-ETH`, `USDT-SOL` 같은 원화·USDT 거래쌍을 지원한다. 시세는 거래소의 1분봉을 페이지별로 수집하고, 거래가 없는 분을 채우지 않는다. 418·429 응답은 최소 60초 대기하며 즉시 반복 호출하지 않는다. 모의 잔액·예산은 실제 계좌 잔액과 별도이고, KRW·USD·USDT 손익을 더하거나 자동 환전하지 않는다. 코인의 하루 손실 기준은 UTC 날짜로 갱신한다.
+`KRW-BTC`, `KRW-ETH`, `USDT-SOL` 같은 원화·USDT 거래쌍을 지원한다. 시세는 거래소의 1분봉을 페이지별로 수집하고, 거래가 없는 분을 채우지 않는다. 418·429 응답은 최소 60초 대기하며 즉시 반복 호출하지 않는다. 모의 잔액·예산은 실제 계좌 잔액과 별도이고, 운용 원장은 KRW·USD·USDT별로 분리한다. Telegram `/profit`과 웹 포트폴리오의 [운용 수익](profit.md)은 현재 참고 환율로 원화 합산을 표시하며 실제 환전은 하지 않는다. 코인의 하루 손실 기준은 UTC 날짜로 갱신한다.
 
 공식 근거: [인증](https://docs.upbit.com/kr/reference/auth), [분봉](https://docs.upbit.com/kr/reference/list-candles-minutes), [원화 거래 단위](https://docs.upbit.com/kr/docs/krw-market-info).
 
