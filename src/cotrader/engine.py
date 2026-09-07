@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import select
 
 from cotrader.broker import BrokerError, TossBroker, current_session
@@ -104,6 +105,163 @@ class Engine:
         self.market_error = ""
         self.lock = None
         self.last_account_refresh = self.last_market_refresh
+        self.rotation_history = None
+        self.rotation_error = ""
+        self.last_rotation_refresh = self.last_market_refresh
+        self.rotation_task = None
+
+    async def refresh_rotation_history(self, at):
+        from cotrader.etf_data import fetch_history
+
+        if self.rotation_task and self.rotation_task.done():
+            try:
+                self.rotation_history = self.rotation_task.result()
+                self.rotation_error = ""
+                async with self.sessions.begin() as session:
+                    await put_runtime(session, "etf_rotation_history", self.rotation_history)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                self.rotation_error = (
+                    f"ETF 공개 일봉 조회 실패: {type(exc).__name__}"
+                    if isinstance(exc, httpx.HTTPError)
+                    else f"ETF 일봉 확인 필요: {exc}"
+                )
+            finally:
+                self.rotation_task = None
+            self.last_rotation_refresh = at
+        interval = 60 if self.rotation_error else 1800
+        if self.rotation_task is None and (at - self.last_rotation_refresh).total_seconds() >= interval:
+            # Never block Upbit reconciliation while downloading seven ETF histories.
+            self.rotation_task = asyncio.create_task(fetch_history(at))
+
+    async def check_rotation_start(self, strategy, spec, owned):
+        from cotrader.etf_data import last_completed_session
+        from cotrader.rotation import held, monthly_targets
+
+        await self.refresh_rotation_history(datetime.now(UTC))
+        if not self.rotation_history or self.rotation_error:
+            raise ValueError(
+                self.rotation_error or "ETF 7개 일봉 준비 중입니다. 데이터 확인 후 다시 시작하세요"
+            )
+        latest = last_completed_session(datetime.now(UTC))
+        if self.rotation_history["last_session"] != latest:
+            raise ValueError("ETF 직전 정규장 일봉 수집이 끝나지 않았습니다")
+        monthly_targets(self.rotation_history["series"], latest)
+        snapshot = await self.broker.account_snapshot()
+        if amount(snapshot["us_commission_rate"]) > spec.commission_rate:
+            raise ValueError("실제 수수료가 전략의 비용 가정보다 높습니다")
+        if amount(snapshot["cash_buying_power"]["USD"]) < D(strategy.state["cash"]):
+            raise ValueError("계좌의 현금 매수 가능금액이 ETF 공동 예산보다 적습니다")
+        holdings = {r["symbol"]: amount(r["quantity"]) for r in snapshot["holdings"]["items"]}
+        if any(holdings.get(symbol, D(0)) != held(strategy.state, symbol) for symbol in spec.symbols):
+            raise ValueError(
+                "ETF 투자 대상의 기존 보유분 또는 장부와 다른 수량이 있습니다. 자동 편입하지 않습니다"
+            )
+        stocks = {r["symbol"]: r for r in await self.broker.stocks(list(spec.symbols))}
+        if any(not stock_eligible(stocks.get(symbol, {})) for symbol in spec.symbols):
+            raise ValueError("ETF 7개 모두 토스에서 거래 가능한 비레버리지 ETF여야 합니다")
+        if any(o["symbol"] in spec.symbols and o["orderId"] not in owned for o in await self.broker.orders()):
+            raise ValueError("ETF 투자 대상의 수동 주문이 있습니다. 대조 후 다시 시작하세요")
+
+    def rotation_submission_open(self, at):
+        for day in self.calendar.values():
+            regular = day.get("regularMarket") if isinstance(day, dict) else None
+            if regular and (
+                datetime.fromisoformat(regular["startTime"])
+                <= at
+                < datetime.fromisoformat(regular["endTime"]) - timedelta(seconds=65)
+            ):
+                return True
+        return False
+
+    async def evaluate_rotation(self, session, strategy, spec, at):
+        from cotrader.etf_data import last_completed_session
+        from cotrader.rotation import NEW_YORK, decide_rotation
+
+        if not self.rotation_submission_open(at):
+            strategy.reason = "ETF 주문은 미국 정규장에 준비하며 마감 65초 전부터 신규 주문을 중단합니다"
+            return
+        if (
+            self.rotation_error
+            or not self.rotation_history
+            or (at - datetime.fromisoformat(self.rotation_history["checked_at"])).total_seconds() > 3600
+        ):
+            strategy.reason = self.rotation_error or "ETF 배당 포함 일봉 수집 대기"
+            return
+        if any(not stock_eligible(self.stocks.get(symbol, {})) for symbol in spec.symbols):
+            strategy.reason = "ETF 투자 대상 전체의 거래 가능 상태 확인 필요"
+            return
+        if await session.scalar(
+            select(Intent.id).where(
+                Intent.mode == strategy.mode,
+                Intent.venue == "toss",
+                Intent.symbol.in_(spec.symbols),
+                Intent.status.in_(ACTIVE_ORDERS),
+            )
+        ):
+            strategy.reason = "ETF 기존 주문·부분 체결·취소 결과 대조 중"
+            return
+        start = (
+            at.astimezone(NEW_YORK)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
+        attempts = (
+            await session.scalars(
+                select(Intent).where(
+                    Intent.strategy_id == strategy.id,
+                    Intent.created_at >= start,
+                )
+            )
+        ).all()
+        if any(row.status == "REJECTED" for row in attempts):
+            strategy.status, strategy.reason = "PAUSED", "ETF 주문 거절 — 자동 재주문을 중단했습니다"
+            session.add(Event(kind="risk", strategy_id=strategy.id, message=strategy.reason, notify=True))
+            return
+        if len(attempts) >= 14:
+            strategy.reason = "ETF 일별 주문 준비 14회 한도 — 다음 정규장 대기"
+            return
+        state = json.loads(json.dumps(strategy.state))
+        try:
+            decision, reason = decide_rotation(
+                spec,
+                state,
+                self.quotes,
+                self.rotation_history["series"],
+                at,
+                last_completed_session(at),
+            )
+        except (ValueError, KeyError, ArithmeticError) as exc:
+            strategy.reason = str(exc)
+            return
+        strategy.state, strategy.reason = state, reason
+        if decision:
+            session.add(
+                Intent(
+                    strategy_id=strategy.id,
+                    venue="toss",
+                    mode=strategy.mode,
+                    symbol=decision.symbol,
+                    side=decision.side,
+                    quantity=decision.quantity,
+                    price=decision.price,
+                    reason=decision.reason,
+                )
+            )
+            session.add(
+                Event(
+                    kind="signal",
+                    strategy_id=strategy.id,
+                    message=f"{decision.symbol}: {decision.reason}",
+                    data={
+                        "target_date": state["target_date"],
+                        "side": decision.side,
+                        "quantity": str(decision.quantity),
+                        "price": str(decision.price),
+                        "data_fingerprint": self.rotation_history["fingerprint"],
+                    },
+                )
+            )
 
     async def check_live_start(self, strategy, session=None):
         """Fresh account readback; Upbit's test endpoint cannot create an order."""
@@ -130,6 +288,9 @@ class Engine:
         ):
             raise ValueError("기존 실거래 미체결·미확인 주문의 대조가 끝난 후 시작하세요")
         owned = {r.broker_id for r in intents if r.broker_id}
+        if spec.kind == "rotation":
+            await self.check_rotation_start(strategy, spec, owned)
+            return
         if strategy.venue == "toss":
             snapshot = await self.broker.account_snapshot()
             cash = amount(snapshot["cash_buying_power"]["USD"])
@@ -475,6 +636,12 @@ class Engine:
                         LOG.warning("broker unavailable: %s", exc.code)
                     await asyncio.sleep(1)
         finally:
+            if self.rotation_task:
+                self.rotation_task.cancel()
+                with contextlib.suppress(
+                    asyncio.CancelledError, httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError
+                ):
+                    await self.rotation_task
             if self.fx_task:
                 self.fx_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -537,20 +704,39 @@ class Engine:
                     session.add(Event(kind="command", message=f"명령 거절: {exc}", notify=True))
         async with self.sessions() as session:
             strategies = (
-                await session.scalars(select(Strategy).where(Strategy.status.in_(["RUNNING", "PAUSED"])))
+                await session.scalars(
+                    select(Strategy).where(Strategy.status.in_(["DRAFT", "RUNNING", "PAUSED"]))
+                )
             ).all()
-        symbols = sorted({s.symbol for s in strategies if s.venue == "toss" and s.state.get("funded")})
+        symbols = sorted(
+            {
+                symbol
+                for s in strategies
+                if s.venue == "toss" and s.state.get("funded")
+                for symbol in StrategySpec.model_validate(s.config).symbols
+            }
+        )
         crypto_symbols = sorted({s.symbol for s in strategies if is_upbit(s.venue) and s.state.get("funded")})
         at = datetime.now(UTC)
         if self.settings.account_reads_enabled and (at - self.last_account_refresh).total_seconds() >= 60:
             await self.refresh_account(at)
         if self.settings.market_source == "toss":
             try:
-                await self.market_refresh(symbols, at)
+                await self.market_refresh(
+                    symbols,
+                    at,
+                    candle_symbols={
+                        s.symbol
+                        for s in strategies
+                        if s.venue == "toss" and s.state.get("funded") and s.config["kind"] != "rotation"
+                    },
+                )
                 self.market_error = ""
             except BrokerError as exc:
                 self.quotes = {k: v for k, v in self.quotes.items() if k.startswith(("KRW-", "USDT-"))}
                 self.market_error = exc.code
+        if self.settings.market_source == "toss" and any(s.config["kind"] == "rotation" for s in strategies):
+            await self.refresh_rotation_history(at)
         await self.resolve_commands()
         if self.settings.upbit_enabled:
             await self.upbit_refresh(crypto_symbols, at)
@@ -704,7 +890,7 @@ class Engine:
                     "message": exc.code if isinstance(exc, BrokerError) else str(exc)[:300],
                 }
 
-    async def market_refresh(self, symbols, at):
+    async def market_refresh(self, symbols, at, *, candle_symbols=None):
         if self.refresh or (at - self.last_market_refresh).total_seconds() >= 60:
             self.calendar = await self.broker.calendar()
             if self.settings.account_seq is not None:
@@ -738,6 +924,8 @@ class Engine:
         candle_minute = at.replace(second=0, microsecond=0)
         if self.last_candle_minute != candle_minute:
             for symbol in valid_symbols:
+                if candle_symbols is not None and symbol not in candle_symbols:
+                    continue
                 try:
                     data = await self.broker.candles(symbol)
                 except BrokerError:
@@ -885,6 +1073,12 @@ class Engine:
                 or quote.at.replace(tzinfo=None) <= intent.updated_at
             ):
                 return
+            if (
+                spec.kind == "rotation"
+                and (current_session(self.calendar, datetime.now(UTC)) or (None,))[0] != "regularMarket"
+            ):
+                intent.status = "CANCELED"
+                return
             price = quote.ask if intent.side == "BUY" else quote.bid
             crosses = price <= intent.price if intent.side == "BUY" else price >= intent.price
             depth = quote.ask_size if intent.side == "BUY" else quote.bid_size
@@ -949,11 +1143,21 @@ class Engine:
         own_ids = {r.broker_id for r in intents if r.broker_id}
         pending_symbols = {asset_key(r.venue, r.symbol) for r in intents if r.status in ACTIVE_ORDERS}
         for strategy in strategies:
-            key = asset_key(strategy.venue, strategy.symbol)
+            spec = StrategySpec.model_validate(strategy.config)
+            keys = {asset_key(strategy.venue, symbol): symbol for symbol in spec.symbols}
             foreign_order = any(
-                order_key == key and order_id not in own_ids for order_key, order_id in open_orders
+                order_key in keys and order_id not in own_ids for order_key, order_id in open_orders
             )
-            mismatch = key not in pending_symbols and holdings.get(key, D(0)) != D(strategy.state["quantity"])
+            from cotrader.rotation import held
+
+            mismatch = any(
+                key not in pending_symbols
+                and holdings.get(key, D(0))
+                != (
+                    held(strategy.state, symbol) if spec.kind == "rotation" else D(strategy.state["quantity"])
+                )
+                for key, symbol in keys.items()
+            )
             if foreign_order or mismatch:
                 async with self.sessions.begin() as session:
                     row = await session.get(Strategy, strategy.id)
@@ -975,6 +1179,11 @@ class Engine:
             expired = strategy.config.get(
                 "execution_policy"
             ) != "maker_only" and now() - intent.created_at > timedelta(seconds=60)
+            if (
+                strategy.config["kind"] == "rotation"
+                and (current_session(self.calendar, datetime.now(UTC)) or (None,))[0] != "regularMarket"
+            ):
+                expired = True
             if strategy.status == "RUNNING" and not expired:
                 continue
             if intent.status == "PREPARED" or intent.mode == "paper":
@@ -1021,6 +1230,9 @@ class Engine:
                     or portfolio.data.get("unresolved_orders")
                 ):
                     strategy.reason = "전체 평가금액 확인 또는 위험 중단 해제 필요"
+                    continue
+                if spec.kind == "rotation":
+                    await self.evaluate_rotation(session, strategy, spec, at)
                     continue
                 stock = self.stocks.get(strategy.symbol, {})
                 eligible = stock_eligible(stock)
@@ -1162,6 +1374,9 @@ class Engine:
         if strategy.status != "RUNNING" or account.halted or not self.settings.live_for(intent.venue):
             return
         maker_only = strategy.config.get("execution_policy") == "maker_only"
+        rotating = strategy.config["kind"] == "rotation"
+        if rotating and not self.rotation_submission_open(datetime.now(UTC)):
+            return
         if is_upbit(intent.venue) and recovery:
             return  # Identifier lookup only; never a second POST after an ambiguous response.
         if recovery and (intent.submitted_at is None or now() - intent.submitted_at >= timedelta(minutes=9)):
@@ -1244,12 +1459,16 @@ class Engine:
                         row.status, row.reason = "REJECTED", "증권사·전략 현금 한도 부족"
                     return
             elif intent.quantity > min(
-                await self.broker.sellable(intent.symbol), D(strategy.state["quantity"])
+                await self.broker.sellable(intent.symbol),
+                D(strategy.state.get("positions", {}).get(intent.symbol, {}).get("quantity", "0"))
+                if rotating
+                else D(strategy.state["quantity"]),
             ):
                 raise BrokerError("sellable-quantity-mismatch")
             quote = self.quotes.get(intent.symbol)
             if (
                 (intent.venue == "toss" and not current_session(self.calendar, datetime.now(UTC)))
+                or (rotating and not self.rotation_submission_open(datetime.now(UTC)))
                 or not quote
                 or not quote.valid(StrategySpec.model_validate(strategy.config), datetime.now(UTC))
             ):

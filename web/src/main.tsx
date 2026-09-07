@@ -5,6 +5,7 @@ import { ResearchLibrary } from "./ResearchLibrary";
 import { Start } from "./Start";
 import { Guide } from "./Guide";
 import { ProfitPanel, ProfitReport } from "./ProfitPanel";
+import RotationDetails from "./RotationDetails";
 import {
   MarketCautionFields,
   MarketCautionSummary,
@@ -67,6 +68,7 @@ const kindName: Data = {
   grid: "그리드",
   trend: "추세 추종",
   rebound: "과매도 반등",
+  rotation: "ETF 월간 교체",
 };
 
 class ApiError extends Error {
@@ -848,14 +850,24 @@ function App({
                 {strategies
                   .filter((s) => s.mode === mode && s.status !== "ARCHIVED")
                   .map((s) => (
-                    <section className="panel strategy-card" key={s.id}>
+                    <section
+                      className={`panel strategy-card${s.config.kind === "rotation" ? " rotation-card" : ""}`}
+                      key={s.id}
+                    >
                       <div className="section-heading">
                         <div>
                           <span className="eyebrow">
                             {kindName[s.config.kind]}
                           </span>
                           <h2>
-                            {s.symbol} <span className="muted">/ {s.name}</span>
+                            {s.config.kind === "rotation" ? (
+                              s.name
+                            ) : (
+                              <>
+                                {s.symbol}{" "}
+                                <span className="muted">/ {s.name}</span>
+                              </>
+                            )}
                           </h2>
                         </div>
                         <span className="badge neutral">
@@ -872,13 +884,21 @@ function App({
                           <strong>{money(s.config.budget)}</strong>
                         </div>
                         <div>
-                          <small>보유 수량</small>
+                          <small>
+                            {s.config.kind === "rotation"
+                              ? "보유 ETF"
+                              : "보유 수량"}
+                          </small>
                           <strong>
-                            {Number(s.state.quantity)}
-                            {unit}
+                            {s.config.kind === "rotation"
+                              ? `${Object.values(s.state.positions || {}).filter((p) => Number((p as Data).quantity) > 0).length}종`
+                              : `${Number(s.state.quantity)}${unit}`}
                           </strong>
                         </div>
                       </div>
+                      {s.config.kind === "rotation" && (
+                        <RotationDetails state={s.state} data={s.etf_data} />
+                      )}
                       {s.config.kind === "grid" && (
                         <div className="grid-visual">
                           <span>{money(s.config.lower)}</span>
@@ -953,6 +973,12 @@ function App({
                           현금·매도 수익이 아닙니다.
                         </p>
                       )}
+                      <InventoryHandoverAction
+                        strategy={s}
+                        strategies={strategies}
+                        busy={busy}
+                        onConfirm={setConfirm}
+                      />
 
                       {Number(s.config.inventory_quantity) > 0 && (
                         <p className="banner">
@@ -1013,11 +1039,16 @@ function App({
                         )}
                         <button
                           className="outline"
-                          disabled={Number(s.config.inventory_quantity) > 0}
+                          disabled={
+                            Number(s.config.inventory_quantity) > 0 ||
+                            s.config.kind === "rotation"
+                          }
                           title={
-                            Number(s.config.inventory_quantity) > 0
-                              ? "계좌 편입 초안은 과거 백테스트 대상이 아닙니다"
-                              : undefined
+                            s.config.kind === "rotation"
+                              ? "ETF 교체 전략은 7개 ETF 일봉을 함께 검증해야 합니다"
+                              : Number(s.config.inventory_quantity) > 0
+                                ? "계좌 편입 초안은 과거 백테스트 대상이 아닙니다"
+                                : undefined
                           }
                           onClick={() => {
                             setSelected(s);
@@ -1521,14 +1552,18 @@ function App({
                     </table>
                   </div>
                 )}
-                {!Number(confirm.strategy.config.inventory_quantity) && (
-                  <p>
-                    {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
-                    {confirm.strategy.config.fast}/
-                    {confirm.strategy.config.slow} · RSI{" "}
-                    {confirm.strategy.config.rsi_period}
-                  </p>
+                {confirm.strategy.config.kind === "rotation" && (
+                  <RotationDetails state={confirm.strategy.state} />
                 )}
+                {confirm.strategy.config.kind !== "rotation" &&
+                  !Number(confirm.strategy.config.inventory_quantity) && (
+                    <p>
+                      {confirm.strategy.config.timeframe}분 봉 · EMA{" "}
+                      {confirm.strategy.config.fast}/
+                      {confirm.strategy.config.slow} · RSI{" "}
+                      {confirm.strategy.config.rsi_period}
+                    </p>
+                  )}
                 {confirm.strategy.config.kind === "grid" &&
                   !Number(confirm.strategy.config.inventory_quantity) && (
                     <p>
@@ -2266,13 +2301,23 @@ function StrategyForm({
           e.preventDefault();
           const { name, ...spec } = form;
           onSave({
-            name: name || `${spec.symbol} ${kindName[spec.kind]}`,
+            name:
+              name ||
+              (spec.kind === "rotation"
+                ? "ETF 월간 모멘텀 252 · 상위 2개"
+                : `${spec.symbol} ${kindName[spec.kind]}`),
             mode,
             spec: {
               ...spec,
-              symbol: spec.symbol.toUpperCase(),
-              lower: spec.lower || null,
-              upper: spec.upper || null,
+              symbol:
+                spec.kind === "rotation"
+                  ? "ETF-ROTATION"
+                  : spec.symbol.toUpperCase(),
+              lower: spec.kind === "rotation" ? null : spec.lower || null,
+              upper: spec.kind === "rotation" ? null : spec.upper || null,
+              signal_gate: spec.kind === "rotation" ? false : spec.signal_gate,
+              rotation_policy:
+                spec.kind === "rotation" ? "monthly_252_top2_v1" : null,
             },
           });
         }}
@@ -2295,11 +2340,16 @@ function StrategyForm({
           저장 후 주문 규모와 설정을 확인하고 실행할 수 있습니다.
         </p>
         <div className="form-grid">
-          {input("symbol", isCrypto(venue) ? "코인 거래쌍" : "미국 종목 코드", {
-            placeholder: marketInfo(venue).example,
-            required: true,
-            autoCapitalize: "characters",
-          })}
+          {form.kind !== "rotation" &&
+            input(
+              "symbol",
+              isCrypto(venue) ? "코인 거래쌍" : "미국 종목 코드",
+              {
+                placeholder: marketInfo(venue).example,
+                required: true,
+                autoCapitalize: "characters",
+              },
+            )}
           {input("name", "전략 이름", { placeholder: "선택 사항" })}
           <label>
             전략
@@ -2310,6 +2360,11 @@ function StrategyForm({
               <option value="grid">그리드</option>
               <option value="trend">추세 추종</option>
               <option value="rebound">과매도 반등</option>
+              {venue === "toss" && (
+                <option value="rotation">
+                  ETF 월간 교체 · 7종 중 상위 2개
+                </option>
+              )}
             </select>
           </label>
           {input("budget", `배정 예산 · ${currency}`, {
@@ -2320,6 +2375,7 @@ function StrategyForm({
             required: true,
           })}
         </div>
+        {form.kind === "rotation" && <RotationDetails />}
         {form.kind === "grid" && (
           <>
             <div className="form-section-title">그리드 가격선</div>
@@ -2377,24 +2433,34 @@ function StrategyForm({
         <details>
           <summary>신호와 체결 설정</summary>
           <div className="form-grid">
-            {input("timeframe", "신호 봉 · 분", {
-              type: "number",
-              min: 1,
-              max: 240,
-            })}
-            {input("fast", "단기 이동평균 기간", { type: "number", min: 2 })}
-            {input("slow", "장기 이동평균 기간", { type: "number", min: 3 })}
-            {input("rsi_period", "RSI 기간", { type: "number", min: 2 })}
-            {input("rsi_entry", "RSI 진입 회복선", {
-              type: "number",
-              min: 5,
-              max: 45,
-            })}
-            {input("rsi_exit", "RSI 매도선", {
-              type: "number",
-              min: 50,
-              max: 90,
-            })}
+            {form.kind !== "rotation" && (
+              <>
+                {input("timeframe", "신호 봉 · 분", {
+                  type: "number",
+                  min: 1,
+                  max: 240,
+                })}
+                {input("fast", "단기 이동평균 기간", {
+                  type: "number",
+                  min: 2,
+                })}
+                {input("slow", "장기 이동평균 기간", {
+                  type: "number",
+                  min: 3,
+                })}
+                {input("rsi_period", "RSI 기간", { type: "number", min: 2 })}
+                {input("rsi_entry", "RSI 진입 회복선", {
+                  type: "number",
+                  min: 5,
+                  max: 45,
+                })}
+                {input("rsi_exit", "RSI 매도선", {
+                  type: "number",
+                  min: 50,
+                  max: 90,
+                })}
+              </>
+            )}
             {input("max_spread_bps", "호가 차이 상한 · bp", {
               type: "number",
               min: 1,
