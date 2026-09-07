@@ -17,6 +17,9 @@ class InventoryGridRequest(BaseModel):
     source_strategy_id: str | None = Field(default=None, max_length=36)
     source_version: int | None = None
     source_approval: str | None = Field(default=None, max_length=16)
+    target_strategy_id: str | None = Field(default=None, max_length=36)
+    target_version: int | None = None
+    target_approval: str | None = Field(default=None, max_length=16)
     grids: int = Field(default=5, ge=2, le=30)
     step_percent: D = Field(default=D("2"), ge=D("0.5"), le=D("10"))
 
