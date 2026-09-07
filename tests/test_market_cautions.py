@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 from test_parallel_upbit_start import books, setup_pair
-from test_usdt_maker import fixture, request, running, spec
+from test_usdt_maker import fixture, quote, request, running, spec
 
 from cotrader.domain import D, StrategySpec
 from cotrader.markets import UPBIT_CAUTION_LABELS
@@ -218,6 +218,7 @@ async def test_evaluation_and_final_dispatch_share_policy_and_keep_other_guards(
     async with engine.sessions.begin() as session:
         row = await session.get(Strategy, owner_id)
         row.config = {**row.config, "allowed_market_cautions": [VOLUME] if allowed else []}
+    engine.quotes["USDT-SOL"] = quote()
     await engine.evaluate(datetime.now(UTC))
     async with engine.sessions.begin() as session:
         intents = (await session.scalars(select(Intent))).all()
@@ -240,6 +241,7 @@ async def test_evaluation_and_final_dispatch_share_policy_and_keep_other_guards(
             await session.flush()
             intent_id = intent.id
     engine.upbit.place.return_value = {"orderId": "fixture-order"}
+    engine.quotes["USDT-SOL"] = quote()
     await engine.submit_live(intent_id)
     assert engine.upbit.place.await_count == int(expected)
     async with engine.sessions() as session:

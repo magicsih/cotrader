@@ -84,6 +84,7 @@ async def enqueue(session, command_id: str, action: str, payload: dict, actor: s
         "check_live",
         "prepare_inventory",
         "set_market_cautions",
+        "set_usdt_capital",
     }:
         raise ValueError("지원하지 않는 명령입니다")
     command = Command(id=command_id, action=action, payload=payload, actor=actor)
@@ -166,6 +167,10 @@ async def process_command(session, command, settings, *, live_checked=False):
                 notify=True,
             )
         )
+    elif command.action == "set_usdt_capital":
+        from cotrader.capital import set_capital
+
+        await set_capital(session, command, settings)
     elif command.action == "set_market_cautions":
         request = MarketCautionsRequest.model_validate(payload)
         row = await session.get(Strategy, request.strategy_id)
@@ -186,21 +191,22 @@ async def process_command(session, command, settings, *, live_checked=False):
             }
         )
         previous = row.config.get("allowed_market_cautions", [])
-        row.config = spec.model_dump(mode="json")
-        row.version += 1
-        session.add(
-            Event(
-                kind="audit",
-                strategy_id=row.id,
-                message="전략별 주의 항목 허용 설정 변경",
-                data={
-                    "actor": command.actor,
-                    "version": row.version,
-                    "previous": previous,
-                    "allowed_market_cautions": row.config["allowed_market_cautions"],
-                },
+        if tuple(sorted(previous)) != spec.allowed_market_cautions:
+            row.config = spec.model_dump(mode="json")
+            row.version += 1
+            session.add(
+                Event(
+                    kind="audit",
+                    strategy_id=row.id,
+                    message="전략별 주의 항목 허용 설정 변경",
+                    data={
+                        "actor": command.actor,
+                        "version": row.version,
+                        "previous": previous,
+                        "allowed_market_cautions": row.config["allowed_market_cautions"],
+                    },
+                )
             )
-        )
     elif command.action == "archive":
         row = await session.get(Strategy, payload["strategy_id"])
         if not row or row.status == "RUNNING" or D(row.state["quantity"]) != 0:
