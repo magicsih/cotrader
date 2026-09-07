@@ -763,7 +763,7 @@ function App({
                     </span>
                   </div>
                   <RiskRow
-                    title="하루 손실"
+                    title="하루 평가금액 하락"
                     amount={status.daily_loss}
                     current={
                       portfolio?.equity != null
@@ -792,6 +792,15 @@ function App({
                     기준 도달 시 대기 주문을 취소하고 알립니다. 보유분은
                     유지하므로 이후 평가손실은 더 커질 수 있습니다.
                   </p>
+                  {status.auto_recover && (
+                    <p className="fine-print">
+                      자동 재개 켜짐 · 두 기준의{" "}
+                      {Math.round(Number(status.risk_recovery_ratio) * 100)}%
+                      안쪽에서 {status.risk_recovery_seconds}초 이상 안정되고
+                      계좌·주문 점검을 통과해야 재개합니다. 기존 기준점은
+                      유지합니다.
+                    </p>
+                  )}
                   <button
                     className="outline full"
                     onClick={() =>
@@ -813,7 +822,7 @@ function App({
                       onClick={() =>
                         setConfirm({
                           action: "reset_risk",
-                          title: "손실 기준을 재설정할까요?",
+                          title: "평가금액 기준점을 재설정할까요?",
                           detail:
                             "현재 평가금액을 새 기준으로 삼아 추가 손실 허용 범위를 다시 부여합니다. 전략은 별도로 재개해야 합니다.",
                           payload: { mode, venue, confirm: "RESET_ANCHORS" },
@@ -1445,7 +1454,7 @@ function App({
                   />
                 </label>
                 <p>
-                  일일 손실 {confirm.capital.risk.daily_loss} USDT · 고점 대비
+                  일일 평가금액 하락 {confirm.capital.risk.daily_loss} USDT · 고점 대비
                   하락 {confirm.capital.risk.drawdown} USDT 기준을 유지합니다.
                   이미 발생한 손익과 위험 중단 상태도 유지합니다.
                 </p>
@@ -1583,7 +1592,7 @@ function App({
                   </p>
                 )}
                 <p>
-                  하루 손실 {money(status.daily_loss)} / 고점 대비{" "}
+                  하루 평가금액 하락 {money(status.daily_loss)} / 고점 대비{" "}
                   {money(status.drawdown)}에 중단
                 </p>
                 <p>

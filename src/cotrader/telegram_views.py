@@ -247,7 +247,7 @@ def status(engine, upbit, portfolios):
                     ],
                 ),
                 paragraph(
-                    f"미체결 {p.get('pending_orders', 0)}건 · {'손실 기준으로 중단' if p.get('halted') else '운용 가능'}"
+                    f"미체결 {p.get('pending_orders', 0)}건 · {'평가금액 하락 기준으로 중단' if p.get('halted') else '운용 가능'}"
                 ),
             ]
     return blocks, [[button("마켓별·합산 운용 수익", "nav:profit:0")]] + nav("status")
@@ -439,7 +439,7 @@ def strategy(row, settings, pending=False, notice=None):
     risk = settings.risk_for(row.venue)
     blocks.append(
         paragraph(
-            f"손실 기준 · 하루 {number(risk['daily_loss'])} / 고점 대비 {number(risk['drawdown'])} {cur}\n"
+            f"평가금액 하락 기준 · 하루 {number(risk['daily_loss'])} / 고점 대비 {number(risk['drawdown'])} {cur}\n"
             f"{'미국 정규장' if spec.kind == 'rotation' else '전체 거래 세션'} · 중단 시 보유 자산 유지"
         )
     )
@@ -553,7 +553,7 @@ def research(row, public_url):
 def notification(event, intent=None):
     title = {
         "fill": "체결 알림",
-        "risk": "손실 기준 알림",
+        "risk": "평가금액 하락 기준 알림",
         "pause": "중단 처리",
         "health": "연결 확인 필요",
         "research": "전략 발굴 결과",

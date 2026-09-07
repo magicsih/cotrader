@@ -20,7 +20,9 @@
 
 ## 배포
 
-`COTRADER_UPBIT_ENABLED=true`와 기존 계좌 조회 키를 재사용한다. USDT 실거래 서버 허용은 별도 `COTRADER_UPBIT_USDT_LIVE_ENABLED=true`로 설정한다. 공개 예제는 false다. 기본 운용 한도는 `COTRADER_CAPITAL_USDT=500`, 하루 손실 `COTRADER_DAILY_LOSS_USDT=5`, 고점 대비 손실 `COTRADER_DRAWDOWN_USDT=25`다. 이것은 계좌 입금 지시가 아닌 봇의 배정 한도다.
+`COTRADER_UPBIT_ENABLED=true`와 기존 계좌 조회 키를 재사용한다. USDT 실거래 서버 허용은 별도 `COTRADER_UPBIT_USDT_LIVE_ENABLED=true`로 설정한다. 공개 예제는 false다. 기본 운용 한도는 `COTRADER_CAPITAL_USDT=500`, 하루 평가금액 하락 `COTRADER_DAILY_LOSS_USDT=5`, 고점 대비 평가금액 하락 `COTRADER_DRAWDOWN_USDT=25`다. 이것은 계좌 입금 지시가 아닌 봇의 배정 한도다. 두 하락값은 실현손익만이 아니라 보유 자산의 현재 매수호가 평가액까지 포함한다.
+
+`COTRADER_UPBIT_USDT_AUTO_RECOVER=true`이면 위험 중단 뒤 평가금액이 두 기준의 80% 안쪽으로 60초 이상 회복되고 미체결·미확인 주문이 없을 때만 기존 USDT 전략을 자동 재개한다. 중단 기준점은 낮추거나 초기화하지 않으며, 사용자 중단·수량 불일치·거래 주의·계좌 점검 실패는 자동 재개하지 않는다. 기본값은 false다.
 
 기존 문자열 시장 컬럼을 사용하므로 스키마 변경은 없다. bootstrap이 USDT 계정을 추가한다. USDT 전략을 만든 이후에는 USDT를 모르는 이전 이미지로 되돌리지 않는다. 먼저 엔진을 중단하고 해당 버전의 원장 처리 절차를 검토한다.
 

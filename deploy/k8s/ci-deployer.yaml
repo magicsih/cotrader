@@ -1,5 +1,5 @@
-# GitHub Actions 배포 전용 자격이다. Deployment 이미지 교체와 롤아웃 확인만 허용하고
-# Secret, ConfigMap, Ingress에는 접근하지 않는다. 토큰 값은 클러스터가 채우며 저장소에 넣지 않는다.
+# GitHub Actions 배포 전용 자격이다. Deployment 이미지 교체, 승인된 cotrader-config 갱신,
+# 롤아웃 확인만 허용한다. Secret과 Ingress에는 접근하지 않는다.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -25,6 +25,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [cotrader-config]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

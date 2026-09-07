@@ -242,7 +242,7 @@ async def test_waiting_below_first_buy_does_not_halt_but_account_loss_still_does
         await check_risk(session, engine.settings, {"KRW-SOL": quote()}, "2026-01-01", "upbit")
         assert row.status == "RUNNING"  # Current price is below the lowest grid pair.
         await check_risk(session, engine.settings, {"KRW-SOL": quote("98000")}, "2026-01-01", "upbit")
-        assert row.status == "PAUSED" and "손실" in row.reason
+        assert row.status == "PAUSED" and "평가금액 하락" in row.reason
 
 
 async def test_preparation_must_be_handled_by_engine(db):

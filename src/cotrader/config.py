@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     capital_usdt: Decimal = Field(default=Decimal("500"), gt=0, le=10000)
     daily_loss_usdt: Decimal = Field(default=Decimal("5"), gt=0)
     drawdown_usdt: Decimal = Field(default=Decimal("25"), gt=0)
+    upbit_usdt_auto_recover: bool = False
+    risk_recovery_ratio: Decimal = Field(default=Decimal("0.8"), gt=0, lt=1)
+    risk_recovery_seconds: int = Field(default=60, ge=60, le=3600)
     upbit_access_key: SecretStr = Field(default=SecretStr(""), validation_alias="UPBIT_OPEN_API_ACCESS_KEY")
     upbit_secret_key: SecretStr = Field(default=SecretStr(""), validation_alias="UPBIT_OPEN_API_SECRET_KEY")
     capital_usd: Decimal = Field(default=Decimal("5000"), gt=0)
@@ -66,6 +69,9 @@ class Settings(BaseSettings):
             "daily_loss": str(getattr(self, f"daily_loss_{currency(venue).lower()}")),
             "drawdown": str(getattr(self, f"drawdown_{currency(venue).lower()}")),
         }
+
+    def auto_recover_for(self, venue):
+        return venue == "upbit_usdt" and self.upbit_usdt_auto_recover
 
     @model_validator(mode="after")
     def secure_configuration(self):

@@ -9,6 +9,28 @@ from cotrader.live import MarketCautionsRequest
 from cotrader.markets import VENUES, asset_key, currency, is_upbit, portfolio_key, validate_symbol
 from cotrader.models import AccountState, Command, Event, Intent, Ledger, RuntimeState, Strategy, now
 
+LEGACY_RISK_HALT_REASON = "손실 중단 기준 도달 — 주문 취소·보유 유지"
+RISK_HALT_REASON = "평가금액 하락 기준 도달 — 주문 취소·보유 유지"
+RISK_HALT_REASONS = frozenset({LEGACY_RISK_HALT_REASON, RISK_HALT_REASON})
+RISK_RECOVERY_REASON = "평가금액 회복 — 기존 기준점 유지·자동 재개"
+
+
+def portfolio_recovered(data, risk, ratio):
+    """Require a complete, order-free valuation comfortably inside the configured limits."""
+    try:
+        return (
+            data.get("complete") is True
+            and data.get("equity") is not None
+            and data.get("pending_orders") == 0
+            and data.get("unresolved_orders") == 0
+            and D(data.get("daily_loss_limit")) == D(risk["daily_loss"])
+            and D(data.get("drawdown_limit")) == D(risk["drawdown"])
+            and D(data["daily_anchor"]) - D(data["equity"]) <= D(risk["daily_loss"]) * ratio
+            and D(data["high_water"]) - D(data["equity"]) <= D(risk["drawdown"]) * ratio
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
 
 def approval_digest(strategy, settings) -> str:
     snapshot = [
@@ -234,7 +256,7 @@ async def process_command(session, command, settings, *, live_checked=False):
         )
     elif command.action == "reset_risk":
         if payload.get("confirm") != "RESET_ANCHORS":
-            raise ValueError("새 손실 기준으로 재설정한다는 명시적 확인이 필요합니다")
+            raise ValueError("새 평가금액 기준점으로 재설정한다는 명시적 확인이 필요합니다")
         account = await session.get(
             AccountState, {"mode": payload["mode"], "venue": payload.get("venue", "toss")}
         )
@@ -248,7 +270,7 @@ async def process_command(session, command, settings, *, live_checked=False):
         ):
             raise ValueError("최신 평가금액을 확인할 수 없습니다")
         account.daily_anchor = account.high_water = D(snapshot.data["equity"])
-        account.halted, account.reason = False, "사용자가 손실 기준을 현재 평가금액으로 재설정했습니다"
+        account.halted, account.reason = False, "사용자가 기준점을 현재 평가금액으로 재설정했습니다"
         session.add(
             Event(
                 kind="risk",
@@ -439,7 +461,7 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
             account.high_water = max(account.high_water, value)
             daily_loss, dd = account.daily_anchor - value, account.high_water - value
             if not account.halted and (daily_loss >= D(risk["daily_loss"]) or dd >= D(risk["drawdown"])):
-                account.halted, account.reason = True, "손실 중단 기준 도달 — 주문 취소·보유 유지"
+                account.halted, account.reason = True, RISK_HALT_REASON
                 for strategy in funded:
                     strategy.status, strategy.reason = "PAUSED", account.reason
                 session.add(Event(kind="risk", message=f"{mode}: {account.reason}", notify=True))

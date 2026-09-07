@@ -141,12 +141,44 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
           DIGEST: ${{ needs.publish.outputs.digest }}
+          DAILY_LOSS_USDT: ${{ vars.COTRADER_DAILY_LOSS_USDT }}
+          DRAWDOWN_USDT: ${{ vars.COTRADER_DRAWDOWN_USDT }}
+          AUTO_RECOVER_USDT: ${{ vars.COTRADER_UPBIT_USDT_AUTO_RECOVER }}
         run: |
           set -euo pipefail
           case "$DIGEST" in
             sha256:*) ;;
             *) echo "publish job did not report an image digest" >&2; exit 1 ;;
           esac
+          patch=$(python3 - <<'PY'
+          import json
+          import os
+          from decimal import Decimal, InvalidOperation
+
+          names = ("DAILY_LOSS_USDT", "DRAWDOWN_USDT")
+          values = {}
+          for name in names:
+              raw = os.environ.get(name, "")
+              try:
+                  value = Decimal(raw)
+              except InvalidOperation:
+                  raise SystemExit(f"{name} must be a decimal") from None
+              if not value.is_finite() or value <= 0:
+                  raise SystemExit(f"{name} must be a positive finite decimal")
+              values[name] = raw
+          if Decimal(values["DAILY_LOSS_USDT"]) > Decimal(values["DRAWDOWN_USDT"]):
+              raise SystemExit("DAILY_LOSS_USDT must not exceed DRAWDOWN_USDT")
+          auto = os.environ.get("AUTO_RECOVER_USDT", "").lower()
+          if auto not in {"true", "false"}:
+              raise SystemExit("AUTO_RECOVER_USDT must be true or false")
+          print(json.dumps({"data": {
+              "COTRADER_DAILY_LOSS_USDT": values["DAILY_LOSS_USDT"],
+              "COTRADER_DRAWDOWN_USDT": values["DRAWDOWN_USDT"],
+              "COTRADER_UPBIT_USDT_AUTO_RECOVER": auto,
+          }}))
+          PY
+          )
+          kubectl -n cotrader patch configmap cotrader-config --type merge --patch "$patch"
           for name in cotrader-api cotrader-research cotrader-engine; do
             kubectl -n cotrader set image "deployment/$name" "*=$IMAGE"
             kubectl -n cotrader rollout status "deployment/$name" --timeout=10m
@@ -157,5 +189,8 @@ jobs:
           set -euo pipefail
           kubectl -n cotrader get deployment \
             -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas \
+            >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n cotrader get configmap cotrader-config \
+            -o custom-columns=DAILY_LOSS_USDT:.data.COTRADER_DAILY_LOSS_USDT,DRAWDOWN_USDT:.data.COTRADER_DRAWDOWN_USDT,AUTO_RECOVER_USDT:.data.COTRADER_UPBIT_USDT_AUTO_RECOVER \
             >> "$GITHUB_STEP_SUMMARY"
           kubectl -n cotrader get pods --no-headers -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount
