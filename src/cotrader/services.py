@@ -19,7 +19,9 @@ def approval_digest(strategy, settings) -> str:
         str(settings.capital_for(strategy.venue)),
         settings.risk_for(strategy.venue),
         settings.live_for(strategy.venue),
-        "ALL_SESSIONS_HOLD_ON_STOP",
+        "REGULAR_MARKET_HOLD_ON_STOP"
+        if strategy.config["kind"] == "rotation"
+        else "ALL_SESSIONS_HOLD_ON_STOP",
     ]
     return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -126,7 +128,11 @@ async def process_command(session, command, settings, *, live_checked=False):
             await session.scalars(select(Strategy).where(Strategy.id != row.id, Strategy.mode == row.mode))
         ).all()
         funded = [s for s in others if s.state.get("funded")]
-        if any(asset_key(s.venue, s.symbol) == asset_key(row.venue, row.symbol) for s in funded):
+        assets = {asset_key(row.venue, symbol) for symbol in spec.symbols}
+        if any(
+            assets & {asset_key(s.venue, symbol) for symbol in StrategySpec.model_validate(s.config).symbols}
+            for s in funded
+        ):
             raise ValueError("같은 종목은 한 전략만 자금을 배정할 수 있습니다")
         others = [s for s in others if s.venue == row.venue]
         funded = [s for s in funded if s.venue == row.venue]
@@ -321,7 +327,12 @@ async def record_execution(session, intent: Intent, order: dict):
             costs - intent.costs,
         )
         state = json.loads(json.dumps(row.state))
-        apply_fill(state, intent.side, delta_quantity, delta_amount, delta_costs, intent.slot)
+        if row.config["kind"] == "rotation":
+            from cotrader.rotation import apply_execution
+
+            apply_execution(state, intent.symbol, intent.side, delta_quantity, delta_amount, delta_costs)
+        else:
+            apply_fill(state, intent.side, delta_quantity, delta_amount, delta_costs, intent.slot)
         row.state = state
         session.add(
             Ledger(
@@ -336,7 +347,7 @@ async def record_execution(session, intent: Intent, order: dict):
             Event(
                 kind="fill",
                 strategy_id=row.id,
-                message=f"{row.mode} · {row.symbol} {intent.side} {delta_quantity}{'개' if is_upbit(row.venue) else '주'} 체결",
+                message=f"{row.mode} · {intent.symbol} {intent.side} {delta_quantity}{'개' if is_upbit(row.venue) else '주'} 체결",
                 data={
                     "intent_id": intent.id,
                     "quantity": str(delta_quantity),
@@ -379,6 +390,20 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
             costs += D(strategy.state["costs"])
             realized += D(strategy.state["realized"])
         for strategy in funded:
+            if strategy.config["kind"] == "rotation":
+                spec = StrategySpec.model_validate(strategy.config)
+                for symbol, position in strategy.state.get("positions", {}).items():
+                    quantity = D(position["quantity"])
+                    quote = quotes.get(symbol)
+                    if quantity:
+                        if not quote or not quote.fresh(spec, datetime.now(UTC)):
+                            complete = False
+                        if quote:
+                            exposure += quantity * quote.bid
+                basis += D(strategy.state["cost_basis"])
+                costs += D(strategy.state["costs"])
+                realized += D(strategy.state["realized"])
+                continue
             quantity = D(strategy.state["quantity"])
             quote = quotes.get(strategy.symbol)
             spec = StrategySpec.model_validate(strategy.config)

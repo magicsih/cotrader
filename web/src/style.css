@@ -607,6 +607,22 @@ main {
 .strategy-card {
   margin-bottom: 0;
 }
+.rotation-card {
+  grid-column: 1 / -1;
+}
+.rotation-card h2,
+.rotation-details {
+  word-break: keep-all;
+}
+.rotation-reference {
+  border-left: 3px solid #43694c;
+  padding: 12px 16px;
+  margin: 20px 0;
+  background: #eef3e9;
+}
+.rotation-reference p {
+  margin: 8px 0;
+}
 .strategy-card .muted {
   font-size: 0.9444rem;
   font-weight: 400;

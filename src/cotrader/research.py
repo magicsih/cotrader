@@ -43,6 +43,8 @@ def backtest(
     warmup=None,
     stop_requested=None,
 ) -> dict:
+    if spec.kind == "rotation":
+        raise ValueError("ETF 교체 전략은 7개 ETF의 배당 포함 일봉으로 함께 검증해야 합니다")
     if spec.inventory_quantity:
         raise ValueError(
             "보유 코인 편입 초안은 현재 계좌와 평가 기준가를 포함합니다. 과거 검증에는 별도의 현금 기준 연구 설정을 사용하세요"

@@ -370,9 +370,17 @@ def strategy(row, settings, pending=False, notice=None):
         table(
             ["설정", "값"],
             [
-                ["전략", {"grid": "그리드", "trend": "추세 추종", "rebound": "과매도 반등"}[c["kind"]]],
+                [
+                    "전략",
+                    {
+                        "grid": "그리드",
+                        "trend": "추세 추종",
+                        "rebound": "과매도 반등",
+                        "rotation": "ETF 월간 교체",
+                    }[c["kind"]],
+                ],
                 ["예산", f"{number(c['budget'], 2)} {cur}"],
-                ["신호", f"{c['timeframe']}분"],
+                ["신호", "252거래일 · 상위 2개" if spec.kind == "rotation" else f"{c['timeframe']}분"],
                 ["수수료 가정", f"{number(Decimal(c['commission_rate']) * 100, 4)}%"],
                 ["체결 비용 / 호가 차이", f"{c['slippage_bps']} / {c['max_spread_bps']} bp"],
             ],
@@ -406,15 +414,33 @@ def strategy(row, settings, pending=False, notice=None):
                     f"보유 {number(spec.inventory_quantity, 10)}{unit} 편입 · 추가 {cur} 0\n매도부터 시작하고 각 단계의 매도대금으로 재매수합니다.\n손익 기준가 {number(spec.inventory_reference_price)} {cur}"
                 )
             )
-    blocks.append(
-        paragraph(
-            f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']} / 매도 {c['rsi_exit']}"
+    if spec.kind == "rotation":
+        blocks.append(
+            paragraph(
+                "SPY · QQQ · IWM · IEF · TLT · GLD · SHY\n"
+                "최근 252거래일 수익률 상위 2개에 각 50% 배정합니다. 음수 후보 몫은 현금으로 유지합니다.\n"
+                "월 첫 거래일 종가로 선정하고, 다음 정규장에 매도부터 집행합니다. 목표 비중과 5%p 이상 벌어지면 조절합니다.\n"
+                "최초 진입은 직전 완성 정규장 기준입니다. 배당은 순위에 반영하며 실제 배당금은 전략에 자동 편입하지 않습니다."
+            )
         )
-    )
+        positions = [
+            [symbol, number(position["quantity"], 0)]
+            for symbol, position in row.state.get("positions", {}).items()
+            if Decimal(position["quantity"]) > 0
+        ]
+        if positions:
+            blocks.append(table(["보유 ETF", "주"], positions))
+    else:
+        blocks.append(
+            paragraph(
+                f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']} / 매도 {c['rsi_exit']}"
+            )
+        )
     risk = settings.risk_for(row.venue)
     blocks.append(
         paragraph(
-            f"손실 기준 · 하루 {number(risk['daily_loss'])} / 고점 대비 {number(risk['drawdown'])} {cur}\n전체 거래 세션 · 중단 시 보유 자산 유지"
+            f"손실 기준 · 하루 {number(risk['daily_loss'])} / 고점 대비 {number(risk['drawdown'])} {cur}\n"
+            f"{'미국 정규장' if spec.kind == 'rotation' else '전체 거래 세션'} · 중단 시 보유 자산 유지"
         )
     )
     if is_upbit(row.venue):

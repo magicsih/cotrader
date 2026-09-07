@@ -19,12 +19,14 @@ from cotrader.markets import (
 D = Decimal
 ZERO = D(0)
 ACTIVE_ORDERS = {"PREPARED", "SENDING", "UNKNOWN", "PENDING", "PARTIAL_FILLED", "PENDING_CANCEL"}
+ETF_UNIVERSE = ("SPY", "QQQ", "IWM", "IEF", "TLT", "GLD", "SHY")
 
 
 class StrategySpec(BaseModel):
     venue: Venue = "toss"
     symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,23}$")
-    kind: Literal["grid", "trend", "rebound"] = "grid"
+    kind: Literal["grid", "trend", "rebound", "rotation"] = "grid"
+    rotation_policy: Literal["monthly_252_top2_v1"] | None = None
     budget: Decimal = Field(gt=0, le=10000000)
     inventory_quantity: Decimal = Field(default=D(0), ge=0)
     inventory_reference_price: Decimal | None = Field(default=None, gt=0)
@@ -51,6 +53,20 @@ class StrategySpec(BaseModel):
     @model_validator(mode="after")
     def validate_grid(self):
         validate_symbol(self.venue, self.symbol)
+        if self.kind == "rotation":
+            self.rotation_policy = "monthly_252_top2_v1"
+        elif self.rotation_policy is not None:
+            raise ValueError("월간 ETF 정책은 ETF 교체 전략에서만 사용할 수 있습니다")
+        if self.kind == "rotation" and (
+            self.venue != "toss"
+            or self.symbol != "ETF-ROTATION"
+            or self.inventory_quantity
+            or self.execution_policy != "trigger_limit"
+            or self.signal_gate
+            or self.lower is not None
+            or self.upper is not None
+        ):
+            raise ValueError("ETF 교체 전략은 토스 ETF-ROTATION, 현금 시작, 지정가 주문으로 설정하세요")
         if self.allowed_market_cautions and not is_upbit(self.venue):
             raise ValueError("주의 항목 허용은 업비트 전략에서만 설정할 수 있습니다")
         self.allowed_market_cautions = tuple(sorted(set(self.allowed_market_cautions)))
@@ -99,6 +115,10 @@ class StrategySpec(BaseModel):
             if minimum_gap <= self.commission_rate * 2 + self.slippage_bps / D(10000) * 2:
                 raise ValueError("그리드 간격이 왕복 수수료와 가정한 체결 비용보다 좁습니다")
         return self
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return ETF_UNIVERSE if self.kind == "rotation" else (self.symbol,)
 
 
 def tick(price: Decimal, venue: Venue = "toss") -> Decimal:
@@ -176,7 +196,7 @@ class Quote:
     def fresh(self, spec: StrategySpec, at: datetime) -> bool:
         age = (at - self.at).total_seconds()
         return bool(
-            self.symbol == spec.symbol
+            self.symbol in spec.symbols
             and self.bid > 0
             and self.ask >= self.bid
             and 0 <= age <= spec.quote_max_age
@@ -229,6 +249,7 @@ class Decision:
     price: Decimal
     reason: str
     slot: int | None = None
+    symbol: str | None = None
 
 
 def ema(values: list[Decimal], period: int) -> list[Decimal]:
@@ -288,6 +309,8 @@ def aggregate(bars: list[Bar], minutes: int, at: datetime) -> list[Bar]:
 def decide(
     spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar], *, blocked_slots=frozenset()
 ) -> tuple[Decision | None, str]:
+    if spec.kind == "rotation":
+        raise ValueError("ETF 교체 전략은 여러 종목의 일봉과 공동 예산 판단이 필요합니다")
     if spec.inventory_quantity:
         if spec.execution_policy == "maker_only":
             return maker_grid_decision(spec, state, quote, blocked_slots)

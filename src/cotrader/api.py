@@ -220,6 +220,26 @@ def create_app(settings: Settings | None = None, sessions_override=None):
     @app.get("/api/strategies")
     async def strategies(_actor: Actor):
         async with sessions() as session:
+            etf_history = await session.get(RuntimeState, "etf_rotation_history")
+            etf_readiness = (
+                {
+                    "last_session": etf_history.data["last_session"],
+                    "checked_at": etf_history.data["checked_at"],
+                    "source": etf_history.data["source"],
+                    "bars": {s: len(rows) for s, rows in etf_history.data["series"].items()},
+                }
+                if etf_history
+                else None
+            )
+            if etf_history:
+                from cotrader.rotation import monthly_targets
+
+                try:
+                    etf_readiness["reference_targets"] = monthly_targets(
+                        etf_history.data["series"], etf_history.data["last_session"]
+                    )[0]
+                except (ValueError, KeyError, ArithmeticError):
+                    etf_readiness["reference_targets"] = None
             pending = {
                 strategy_id
                 for payload in await session.scalars(
@@ -238,6 +258,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             return [
                 {
                     **serialize(row),
+                    "etf_data": etf_readiness if row.config["kind"] == "rotation" else None,
                     "approval": approval_digest(row, settings),
                     "pending_settings": row.id in pending
                     or bool(capital_pending and row.venue == "upbit_usdt" and row.mode == "live"),
@@ -256,6 +277,8 @@ def create_app(settings: Settings | None = None, sessions_override=None):
 
     @app.post("/api/strategies/preview")
     async def preview(body: StrategyInput, _actor: Actor):
+        from cotrader.rotation import summary
+
         return {
             "spec": body.spec.model_dump(mode="json"),
             "grid": [
@@ -271,7 +294,12 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             "maximum_budget": str(body.spec.budget),
             "mode": body.mode,
             "loss_action": "대기 주문 취소·보유 유지·알림",
-            "sessions": "24시간" if is_upbit(body.spec.venue) else "토스 지원 전체 세션",
+            "sessions": "미국 정규장"
+            if body.spec.kind == "rotation"
+            else "24시간"
+            if is_upbit(body.spec.venue)
+            else "토스 지원 전체 세션",
+            "rotation": summary() if body.spec.kind == "rotation" else None,
             "currency": currency(body.spec.venue),
             "costs": "모의 수수료와 체결 비용은 설정값이며 실제 비용과 다를 수 있습니다",
         }
