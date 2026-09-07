@@ -59,6 +59,52 @@ docker buildx build --platform linux/arm64,linux/amd64 --tag cotrader:local --lo
 
 DB 백업은 `mysqldump --single-transaction` 기반으로 cotrader 스키마를 매일 클러스터 밖에 보관한다. 최소 일별 7개·주별 4개를 유지하고 별도 임시 DB에 복원하여 원장 건수·누적 체결·마지막 주문 상태를 검사한다. 실제 저장 대상·암호화 키가 정해지기 전 백업 완료로 표시하지 않는다.
 
+## GitHub Actions 배포
+
+`main` 푸시가 CI를 통과하고 이미지가 게시되면 `deploy` job이 `vzyx-cluster` Environment의 승인을 기다린다. 운영자가 Approve해야 롤아웃이 시작된다. 승인은 배포 승인이며 실거래 시작 승인이 아니다.
+
+이 job은 `cotrader-api`, `cotrader-research`, `cotrader-engine` 세 Deployment의 이미지를 CI가 게시한 digest로 교체하고 각각 `rollout status`를 확인한다. 순서는 api, research, engine이며 앞 단계가 준비되지 않으면 주문 실행기를 재시작하지 않는다.
+
+ConfigMap, Ingress, NetworkPolicy, 실거래 플래그, Alembic 마이그레이션은 자동화하지 않는다. 운영 오버레이는 저장소 밖에 남기고 기존 승인된 수동 절차로만 변경한다.
+
+### 승인 전 확인
+
+- `/pause`로 봇 주문이 모두 종료 상태인지 확인한다. engine 재시작은 롤아웃 중에 일어난다.
+- 스키마 변경이 포함된 커밋은 승인하지 않는다. 위 실행 순서 4번의 수동 마이그레이션을 먼저 끝낸 다음 승인한다.
+- 운영 설정 변경이 필요한 커밋은 오버레이를 먼저 적용한 다음 승인한다.
+
+### 배포 자격
+
+`deploy/k8s/ci-deployer.yaml`의 `github-deployer` ServiceAccount는 cotrader 네임스페이스에서 Deployment의 `get`, `list`, `watch`, `patch`와 Pod 조회만 가진다. Secret 읽기 권한은 없고 다른 네임스페이스에도 접근하지 않는다. 저장소가 공개이므로 워크플로는 클러스터 주소와 해석된 IP를 `add-mask`로 가려 로그에 남기지 않는다.
+
+### 최초 준비
+
+1. 오버레이를 적용해 ServiceAccount, Role, RoleBinding, 토큰 Secret을 만든다. 토큰 값은 클러스터가 채우며 저장소에는 들어가지 않는다.
+2. 승인자를 등록한 `vzyx-cluster` Environment를 만들고 배포 브랜치를 보호 브랜치로 제한한다.
+3. 배포 전용 kubeconfig를 만들어 Environment secret `KUBECONFIG_B64`에 넣는다. 값은 출력하지 않는다.
+
+```bash
+umask 077
+work=$(mktemp -d)
+server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+kubectl -n cotrader get secret github-deployer-token -o jsonpath='{.data.ca\.crt}' | base64 -d > "$work/ca.crt"
+kubectl config set-cluster vzyx --server="$server" --certificate-authority="$work/ca.crt" \
+  --embed-certs=true --kubeconfig="$work/config"
+kubectl config set-credentials github-deployer --kubeconfig="$work/config" \
+  --token="$(kubectl -n cotrader get secret github-deployer-token -o jsonpath='{.data.token}' | base64 -d)"
+kubectl config set-context default --cluster=vzyx --user=github-deployer --namespace=cotrader \
+  --kubeconfig="$work/config"
+kubectl config use-context default --kubeconfig="$work/config"
+
+KUBECONFIG="$work/config" kubectl -n cotrader get deployment
+KUBECONFIG="$work/config" kubectl -n cotrader get secret 2>&1 | tail -1
+
+base64 < "$work/config" | gh secret set KUBECONFIG_B64 --env vzyx-cluster
+rm -rf "$work"
+```
+
+Deployment 조회는 성공하고 Secret 조회는 거부되어야 한다. 토큰을 회전할 때는 `github-deployer-token` Secret을 지우고 다시 적용한 다음 같은 절차로 `KUBECONFIG_B64`를 갱신한다.
+
 ## 중단·복구
 
 - 계획된 배포 전에 `/pause`를 실행하고 모든 봇 주문이 체결·취소 등 종료 상태인지 확인한다. 보유 주식은 유지한다.
