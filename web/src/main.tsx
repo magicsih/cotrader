@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { ResearchLibrary } from "./ResearchLibrary";
@@ -17,6 +17,14 @@ import {
   useMarket,
   formatMoney,
 } from "./Market";
+
+import {
+  approvalMatches,
+  changedApproval,
+  prepareStartApproval,
+  verifyStartApproval,
+  waitForCommand,
+} from "./approval";
 
 type Data = Record<string, any>;
 type Tab = "start" | "overview" | "strategies" | "research" | "orders";
@@ -269,10 +277,12 @@ function App({
     })().catch((e) => setError(e.message));
   }, []);
 
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
     if (!auth) return;
+    const sequence = ++refreshSequence.current;
     const values = await Promise.all([
-      api(`/status?venue=${venue}`),
+      api(`/status?venue=${venue}&mode=${mode}`),
       api(`/portfolio?mode=${mode}&venue=${venue}`),
       api("/strategies"),
       api(`/orders?mode=${mode}&venue=${venue}`),
@@ -285,6 +295,7 @@ function App({
       api("/recommendations"),
       api(`/discoveries?venue=${venue}`),
     ]);
+    if (sequence !== refreshSequence.current) return;
     setDiscoveries(values[11]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
@@ -315,7 +326,10 @@ function App({
   useEffect(() => {
     refresh().catch(showError);
     const timer = setInterval(() => refresh().catch(showError), 5000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      refreshSequence.current++;
+    };
   }, [refresh, showError]);
   const act = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -331,12 +345,46 @@ function App({
   };
   const sendCommand = (action: string, payload: Data) =>
     act(async () => {
-      await api("/commands", { id: crypto.randomUUID(), action, payload });
+      if (action === "start") {
+        try {
+          await verifyStartApproval(api, {
+            id: payload.strategy_id,
+            ...payload,
+          });
+        } catch (error) {
+          setConfirm(null);
+          throw error;
+        }
+      }
+      const command = await api("/commands", {
+        id: crypto.randomUUID(),
+        action,
+        payload,
+      });
       setConfirm(null);
+      if (action === "set_usdt_capital") {
+        setNotice("운용 한도를 반영 중입니다…");
+        try {
+          await waitForCommand(api, command.id);
+        } finally {
+          setNotice("");
+          await refresh();
+        }
+        setNotice(
+          "운용 한도 반영 완료. BTC 설정 확인·시작에서 최신 내용을 확인하세요.",
+        );
+        return;
+      }
       setNotice(
         "요청을 접수했습니다. 아래 처리 기록에서 결과를 확인할 수 있습니다.",
       );
     });
+  const staleConfirmation =
+    confirm?.action === "start" &&
+    !approvalMatches(
+      confirm.strategy,
+      strategies.find((s) => s.id === confirm.strategy.id),
+    );
   const funded = strategies.filter((s) => s.mode === mode && s.state.funded);
   const engineTime = status.engine?.updated_at
     ? new Date(`${status.engine.updated_at}Z`).getTime()
@@ -849,13 +897,28 @@ function App({
                           <button
                             className="outline"
                             disabled={
-                              busy || !["DRAFT", "PAUSED"].includes(s.status)
+                              busy ||
+                              s.pending_settings ||
+                              !["DRAFT", "PAUSED"].includes(s.status)
                             }
-                            onClick={() => setCautionStrategy(s)}
+                            onClick={() =>
+                              act(async () => {
+                                const current = (await api("/strategies")).find(
+                                  (row: Data) => row.id === s.id,
+                                );
+                                if (!current || current.pending_settings)
+                                  throw new Error(
+                                    "주의 설정을 반영 중입니다. 잠시 후 다시 확인하세요.",
+                                  );
+                                setCautionStrategy(current);
+                              })
+                            }
                           >
                             {s.status === "RUNNING"
                               ? "중단 후 주의 설정 변경 가능"
-                              : "주의 설정"}
+                              : s.pending_settings
+                                ? "주의 설정 반영 중…"
+                                : "주의 설정"}
                           </button>
                         </>
                       )}
@@ -964,37 +1027,38 @@ function App({
                           }
                           disabled={
                             busy ||
+                            s.pending_settings ||
                             (s.status !== "RUNNING" &&
                               s.mode === "live" &&
                               !status.live_enabled)
                           }
                           onClick={() =>
                             act(async () => {
-                              const preview =
+                              const prepared =
                                 s.status === "RUNNING"
-                                  ? { grid: [] }
-                                  : await api("/strategies/preview", {
-                                      name: s.name,
-                                      mode: s.mode,
-                                      spec: s.config,
-                                    });
+                                  ? { strategy: s, grid: [] }
+                                  : await prepareStartApproval(api, s.id);
+                              const current = prepared.strategy;
                               setConfirm({
                                 action:
-                                  s.status === "RUNNING" ? "pause" : "start",
+                                  current.status === "RUNNING"
+                                    ? "pause"
+                                    : "start",
                                 title:
-                                  s.status === "RUNNING"
+                                  current.status === "RUNNING"
                                     ? "전략을 중단할까요?"
                                     : "이 설정으로 실행할까요?",
-                                strategy: s.status === "RUNNING" ? null : s,
-                                grid: preview.grid,
+                                strategy:
+                                  current.status === "RUNNING" ? null : current,
+                                grid: prepared.grid,
                                 detail:
-                                  s.status === "RUNNING"
+                                  current.status === "RUNNING"
                                     ? "대기 주문을 취소하고 보유분은 유지합니다."
-                                    : `${s.mode === "paper" ? "모의매매" : "실거래"} · 전체 세션 · 승인한 예산과 설정으로 자동 주문합니다.`,
+                                    : `${current.mode === "paper" ? "모의매매" : "실거래"} · 전체 세션 · 승인한 예산과 설정으로 자동 주문합니다.`,
                                 payload: {
-                                  strategy_id: s.id,
-                                  version: s.version,
-                                  approval: s.approval,
+                                  strategy_id: current.id,
+                                  version: current.version,
+                                  approval: current.approval,
                                 },
                               });
                             })
@@ -1010,6 +1074,36 @@ function App({
                     </section>
                   ))}
               </div>
+              {venue === "upbit_usdt" && mode === "live" && (
+                <section className="panel">
+                  <p>
+                    총운용 한도 {money(status.capital)} · 보유분 편입을 포함한
+                    전략 예산의 상한입니다.
+                  </p>
+                  <button
+                    className="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      act(async () => {
+                        const capital = await api("/upbit-usdt-capital");
+                        setConfirm({
+                          action: "set_usdt_capital",
+                          title: "USDT 운용 한도를 변경할까요?",
+                          detail:
+                            "코트레이더 포켓의 등록 전략을 위한 한도입니다. 메인 포켓 자산은 포함하지 않습니다. 한도 변경만으로 전략을 시작하거나 주문하지 않습니다.",
+                          capital,
+                          payload: {
+                            capital: capital.required,
+                            approval: capital.approval,
+                          },
+                        });
+                      })
+                    }
+                  >
+                    운용 한도 설정
+                  </button>
+                </section>
+              )}
               {!strategies.some(
                 (s) => s.mode === mode && s.status !== "ARCHIVED",
               ) && (
@@ -1192,7 +1286,7 @@ function App({
           onClose={() => setCautionStrategy(null)}
           onSave={(allowed) =>
             act(async () => {
-              await api("/commands", {
+              const command = await api("/commands", {
                 id: crypto.randomUUID(),
                 action: "set_market_cautions",
                 payload: {
@@ -1203,9 +1297,18 @@ function App({
                 },
               });
               setCautionStrategy(null);
-              setNotice(
-                "주의 설정 변경을 요청했습니다. 처리 기록에서 완료를 확인한 뒤 설정 확인·시작을 눌러주세요.",
-              );
+              setNotice("주의 설정을 반영 중입니다…");
+              try {
+                await waitForCommand(api, command.id);
+                setNotice(
+                  "주의 설정 반영이 완료되었습니다. 설정 확인·시작에서 최신 내용을 확인하세요.",
+                );
+              } catch (error) {
+                setNotice("");
+                throw error;
+              } finally {
+                await refresh();
+              }
             })
           }
         />
@@ -1274,6 +1377,48 @@ function App({
           >
             <h2>{confirm.title}</h2>
             <p>{confirm.detail}</p>
+            {confirm.action === "set_usdt_capital" && (
+              <div className="confirm-details">
+                <p>
+                  현재 {confirm.capital.capital} USDT → 등록 전략 전체 필요 한도{" "}
+                  {confirm.capital.required} USDT
+                </p>
+                {confirm.capital.strategies.map((s: Data) => (
+                  <p key={s.id}>
+                    {s.symbol} · 예산 {s.budget} USDT
+                  </p>
+                ))}
+                <label>
+                  변경할 총운용 한도 · USDT
+                  <input
+                    aria-label="변경할 총운용 한도"
+                    type="number"
+                    min={confirm.capital.minimum}
+                    max={confirm.capital.maximum}
+                    step="any"
+                    value={confirm.payload.capital}
+                    onChange={(e) =>
+                      setConfirm({
+                        ...confirm,
+                        payload: {
+                          ...confirm.payload,
+                          capital: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <p>
+                  일일 손실 {confirm.capital.risk.daily_loss} USDT · 고점 대비
+                  하락 {confirm.capital.risk.drawdown} USDT 기준을 유지합니다.
+                  이미 발생한 손익과 위험 중단 상태도 유지합니다.
+                </p>
+                <p>
+                  저장 후 변경된 한도로 전략 설정을 다시 확인해야 시작할 수
+                  있습니다.
+                </p>
+              </div>
+            )}
             {confirm.action === "resolve" && (
               <label>
                 거래소 주문 번호
@@ -1425,6 +1570,9 @@ function App({
                 )}
               </div>
             )}
+            {staleConfirmation && (
+              <p className="banner danger">{changedApproval}</p>
+            )}
             <div className="card-actions">
               <button className="outline" onClick={() => setConfirm(null)}>
                 돌아가기
@@ -1433,7 +1581,16 @@ function App({
                 className="primary"
                 disabled={
                   busy ||
-                  (confirm.action === "resolve" && !confirm.payload.broker_id)
+                  staleConfirmation ||
+                  (confirm.action === "resolve" &&
+                    !confirm.payload.broker_id) ||
+                  (confirm.action === "set_usdt_capital" &&
+                    (!confirm.payload.capital ||
+                      Number(confirm.payload.capital) <= 0 ||
+                      Number(confirm.payload.capital) <
+                        Number(confirm.capital.minimum) ||
+                      Number(confirm.payload.capital) >
+                        Number(confirm.capital.maximum)))
                 }
                 onClick={() => sendCommand(confirm.action, confirm.payload)}
               >

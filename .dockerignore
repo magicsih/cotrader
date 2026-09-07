@@ -14,5 +14,7 @@
 !web/vite.config.ts
 !web/src/
 !web/src/**
+!web/tests/
+!web/tests/**
 **/__pycache__/**
 **/*.pyc
