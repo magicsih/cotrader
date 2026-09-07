@@ -247,3 +247,34 @@ def test_research_rejection_remains_visible_and_never_offers_start():
     blocks, buttons = view.research(row, "https://example.com")
     assert "추천 보류" in str(blocks) and "20일 미만" in str(blocks)
     assert "run:" not in json.dumps(buttons)
+
+
+async def test_research_notification_opens_its_actual_venue_and_fill_uses_units(db):
+    from cotrader.models import DiscoveryRun, Event, Intent
+
+    bot, _ = await setup(db)
+    async with bot.sessions.begin() as s:
+        row = DiscoveryRun(
+            venue="upbit_usdt",
+            status="FAILED",
+            request={"venue": "upbit_usdt", "budget": "500", "symbols": ["USDT-BTC"]},
+            progress={},
+            result={"message": "시세 부족"},
+        )
+        s.add(row)
+        await s.flush()
+    await bot.handle(update(f"research:{row.id}"))
+    assert "업비트 USDT" in str(bot.send.call_args.args[0])
+    assert "nav:research:0" not in str(bot.send.call_args.args[1])
+    event = Event(
+        id="receipt",
+        kind="fill",
+        message="old",
+        created_at=datetime.now(UTC),
+        data={"quantity": "0.0010000000", "amount": "79.50", "costs": "0.19875"},
+    )
+    intent = Intent(venue="upbit_usdt", symbol="USDT-BTC", side="SELL", mode="live")
+    rendered = str(view.notification(event, intent))
+    assert "매도" in rendered and "79.5 USDT" in rendered and "0.19875 USDT" in rendered
+    assert "0.0010000000" not in rendered
+    await bot.client.aclose()

@@ -146,7 +146,7 @@ class TelegramBot:
             for c in commands
         )
 
-    async def screen(self, name, page=0, message_id=None, strategy_id=None, notice=None):
+    async def screen(self, name, page=0, message_id=None, strategy_id=None, notice=None, research_id=None):
         async with self.sessions() as session:
             if name in {"menu", "help"}:
                 blocks, buttons = view.menu()
@@ -203,11 +203,15 @@ class TelegramBot:
                 ).all()
                 blocks, buttons = view.orders(rows, page)
             elif name == "research":
-                row = await session.scalar(
-                    select(DiscoveryRun)
-                    .where(DiscoveryRun.venue == "toss")
-                    .order_by(DiscoveryRun.created_at.desc())
-                    .limit(1)
+                row = (
+                    await session.get(DiscoveryRun, research_id)
+                    if research_id
+                    else await session.scalar(
+                        select(DiscoveryRun)
+                        .where(DiscoveryRun.venue == "toss")
+                        .order_by(DiscoveryRun.created_at.desc())
+                        .limit(1)
+                    )
                 )
                 blocks, buttons = view.research(row, self.settings.public_url)
             elif name in {"web", "guide"}:
@@ -251,12 +255,16 @@ class TelegramBot:
             if len(parts) == 3 and parts[0] == "nav" and parts[2].isdigit() and len(parts[2]) <= 6:
                 await self.screen(parts[1], int(parts[2]), message.get("message_id"))
                 return
-            if parts[0] == "detail" and len(parts) == 2:
+            if parts[0] in {"detail", "research"} and len(parts) == 2:
                 try:
                     strategy_id = str(UUID(parts[1]))
                 except ValueError:
                     return
-                await self.screen("detail", message_id=message.get("message_id"), strategy_id=strategy_id)
+                await self.screen(
+                    parts[0],
+                    message_id=message.get("message_id"),
+                    **{("strategy_id" if parts[0] == "detail" else "research_id"): strategy_id},
+                )
                 return
             if parts[0] not in {"run", "start", "pause"} or len(parts) < 2:
                 return
@@ -348,8 +356,14 @@ class TelegramBot:
             if event.strategy_id:
                 buttons.insert(0, [view.button("해당 전략 보기", f"detail:{event.strategy_id}")])
             elif event.data.get("discovery_id"):
-                buttons.insert(0, [view.button("발굴 결과 보기", "nav:research:0")])
-            await self.send(view.notification(event), buttons)
+                buttons.insert(0, [view.button("발굴 결과 보기", f"research:{event.data['discovery_id']}")])
+            async with self.sessions() as session:
+                intent = (
+                    await session.get(Intent, event.data["intent_id"])
+                    if event.kind == "fill" and event.data.get("intent_id")
+                    else None
+                )
+            await self.send(view.notification(event, intent), buttons)
             async with self.sessions.begin() as session:
                 row = await session.get(Event, event.id)
                 row.sent = True

@@ -379,13 +379,16 @@ def orders(rows, page=0):
 
 
 def research(row, public_url):
-    blocks = [heading("토스증권 · 전략 발굴")]
+    venue = row.request.get("venue", "toss") if row else "toss"
+    cur = currency(venue)
+    label = "토스증권" if venue == "toss" else "업비트 " + cur
+    blocks = [heading(label + " · 전략 발굴")]
     if not row:
         blocks.append(paragraph("아직 발굴 결과가 없습니다. 웹 화면에서 실제 시세로 비교를 시작하세요."))
     else:
         blocks.append(
             paragraph(
-                f"{STATES.get(row.status, row.status)} · {row.progress.get('stage', '')}\n가상 예산 {number(row.request['budget'], 2)} USD · {', '.join(row.request['symbols'])}"
+                f"{STATES.get(row.status, row.status)} · {row.progress.get('stage', '')}\n가상 예산 {number(row.request['budget'], 2)} {cur} · {', '.join(row.request['symbols'])}"
             )
         )
         if row.status == "SUCCEEDED":
@@ -405,8 +408,8 @@ def research(row, public_url):
                     [
                         ["후보 수", result.get("compared_count", 0)],
                         ["선정 후보", f"{spec.get('symbol', '')} · {spec.get('kind', '')}"],
-                        ["마지막 구간 손익", f"{number(final.get('profit'), 2)} USD"],
-                        ["최대 하락폭", f"{number(final.get('max_drawdown'), 2)} USD"],
+                        ["마지막 구간 손익", f"{number(final.get('profit'), 2)} {cur}"],
+                        ["최대 하락폭", f"{number(final.get('max_drawdown'), 2)} {cur}"],
                         ["매수·매도 완료", str(final.get("completed_cycles", 0))],
                     ],
                 )
@@ -427,12 +430,38 @@ def research(row, public_url):
                 f"갱신 {when(row.updated_at)} · 확인번호 {row.id[:8]}\n실제 자금·주문은 사용하지 않는 과거 데이터 비교입니다."
             )
         )
-    return blocks, nav("research") + [[{"text": "데이터·전체 결과 보기", "url": public_url + "/?venue=toss"}]]
+    controls = (
+        [[button("↻ 새로고침", f"research:{row.id}"), button("⌂ 메뉴", "nav:menu:0")]]
+        if row
+        else nav("research")
+    )
+    return blocks, controls + [[{"text": "데이터·전체 결과 보기", "url": public_url + "/?venue=" + venue}]]
 
 
-def notification(event):
-    return [
-        heading("Cotrader 알림"),
-        paragraph(event.message),
-        footer(f"{when(event.created_at)} · 확인번호 {event.id[:8]}"),
-    ]
+def notification(event, intent=None):
+    title = {
+        "fill": "체결 알림",
+        "risk": "손실 기준 알림",
+        "pause": "중단 처리",
+        "health": "연결 확인 필요",
+        "research": "전략 발굴 결과",
+    }.get(event.kind, "Cotrader 알림")
+    blocks = [heading(title)]
+    if intent is not None:
+        cur = currency(intent.venue)
+        blocks += [
+            paragraph(
+                f"{intent.symbol} · {'매수' if intent.side == 'BUY' else '매도'} · {'실거래' if intent.mode == 'live' else '모의'}"
+            ),
+            table(
+                ["이번 처리", "값"],
+                [
+                    ["체결 수량", number(event.data.get("quantity"), 10)],
+                    ["체결 금액", f"{number(event.data.get('amount'), 8)} {cur}"],
+                    ["비용", f"{number(event.data.get('costs'), 8)} {cur}"],
+                ],
+            ),
+        ]
+    else:
+        blocks.append(paragraph(event.message))
+    return blocks + [footer(f"{when(event.created_at)} · 확인번호 {event.id[:8]}")]
