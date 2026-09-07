@@ -802,7 +802,7 @@ footer {
 }
 .inventory-form .card-actions {
   position: sticky;
-  bottom: -24px;
+  bottom: 0;
   background: #fbfcf8;
   padding: 14px 0;
   z-index: 1;

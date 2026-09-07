@@ -6,6 +6,7 @@ import { Start } from "./Start";
 import { Guide } from "./Guide";
 import {
   MarketContext,
+  isCrypto,
   Venue,
   marketInfo,
   useMarket,
@@ -177,7 +178,11 @@ function Chart({
 function TradingApp() {
   const query = new URLSearchParams(window.location.search);
   const [venue, setVenue] = useState<Venue>(
-    query.get("venue") === "upbit" ? "upbit" : "toss",
+    query.get("venue") === "upbit_usdt"
+      ? "upbit_usdt"
+      : query.get("venue") === "upbit"
+        ? "upbit"
+        : "toss",
   );
   return (
     <MarketContext.Provider value={venue}>
@@ -204,12 +209,18 @@ function App({
   onVenue: (venue: Venue) => void;
 }) {
   const { money, currency, unit } = useMarket();
+  const params = new URLSearchParams(window.location.search);
+  const requestedTab = params.get("view") as Tab;
   const [tab, setTab] = useState<Tab>(
-    new URLSearchParams(window.location.search).get("view") === "research"
-      ? "research"
+    ["start", "overview", "strategies", "research", "orders"].includes(
+      requestedTab,
+    )
+      ? requestedTab
       : "start",
   );
-  const [mode, setMode] = useState("paper");
+  const [mode, setMode] = useState(
+    params.get("mode") === "live" ? "live" : "paper",
+  );
   const [status, setStatus] = useState<Data>({});
   const [account, setAccount] = useState<Data>({});
   const [portfolio, setPortfolio] = useState<Data | null>(null);
@@ -433,7 +444,7 @@ function App({
             모든 판단을 기록합니다.
           </p>
           <small>
-            미국 주식 · 원화 코인
+            미국 주식 · KRW·USDT 코인
             <br />
             토스증권 · 업비트
           </small>
@@ -455,6 +466,7 @@ function App({
             >
               <option value="toss">토스 미국 주식 · USD</option>
               <option value="upbit">업비트 코인 · KRW</option>
+              <option value="upbit_usdt">업비트 코인 · USDT</option>
             </select>
           </label>
           <span className="breadcrumb">
@@ -555,9 +567,9 @@ function App({
               onAdvanced={() => setTab("research")}
             />
           )}
-          {venue === "upbit" && (
+          {isCrypto(venue) && (
             <div className="banner">
-              업비트 원화 마켓 ·{" "}
+              업비트 {currency} 마켓 ·{" "}
               {status.live_enabled
                 ? "실거래 허용. 전략별 점검과 시작 확인 후 자동 주문합니다."
                 : "실거래 잠금. 연구·모의매매·계좌 조회를 사용할 수 있습니다."}
@@ -823,10 +835,37 @@ function App({
                         </div>
                       )}
                       <p className="strategy-reason">{s.reason}</p>
+                      {s.venue === "upbit" &&
+                        s.mode === "live" &&
+                        s.state.funded &&
+                        Number(s.state.quantity) > 0 && (
+                          <button
+                            className="outline"
+                            disabled={s.status === "RUNNING"}
+                            onClick={() =>
+                              setInventoryAsset({
+                                currency: s.symbol.split("-")[1],
+                                balance: s.state.quantity,
+                                source: s,
+                              })
+                            }
+                          >
+                            {s.status === "RUNNING"
+                              ? "중단 후 USDT로 보유 이관 가능"
+                              : "USDT로 보유 이관·초안 준비"}
+                          </button>
+                        )}
+                      {Number(s.state.released_value) > 0 && (
+                        <p>
+                          이관 시 평가액 {money(s.state.released_value)} · 실제
+                          현금·매도 수익이 아닙니다.
+                        </p>
+                      )}
+
                       {Number(s.config.inventory_quantity) > 0 && (
                         <p className="banner">
                           보유 {s.config.inventory_quantity}
-                          {unit}로 매도부터 시작 · 추가 원화 0원. 각 단계의
+                          {unit}로 매도부터 시작 · 추가 {currency} 0. 각 단계의
                           매도대금으로 재매수한 뒤 같은 매도가에서 반복합니다.
                         </p>
                       )}
@@ -1107,6 +1146,13 @@ function App({
               </div>
             </>
           )}
+          {Number(portfolio?.released_value) > 0 && (
+            <p className="banner">
+              총 평가에는 다른 시장으로 이관한 보유분의 당시 평가액{" "}
+              {money(portfolio?.released_value)}이 포함됩니다. 사용 가능한
+              현금이 아니며 이관 이후 변동은 새 시장에 기록됩니다.
+            </p>
+          )}
           <footer>
             봇 운용 금액은 {currency} 기준입니다. 시장별 예산·손익은 별도로
             계산합니다.{" "}
@@ -1127,6 +1173,14 @@ function App({
                 payload,
               });
               setInventoryAsset(null);
+              if (payload.source_strategy_id) {
+                window.history.replaceState(
+                  null,
+                  "",
+                  "/?venue=upbit_usdt&mode=live&view=strategies",
+                );
+                onVenue("upbit_usdt");
+              }
               setMode("live");
               setTab("strategies");
               setNotice(
@@ -1205,22 +1259,30 @@ function App({
                       {unit} 전량을 이 전략에 편입합니다.
                     </strong>
                     <p>
-                      추가 원화는 0원입니다. 아래 매도가에서 먼저 팔고, 그
-                      단계의 매도대금으로 아래 매수가에서 재매수합니다. 수량은
-                      단계별 최대 보유 수량이며 이익은 원화로 남습니다.
+                      추가 {currency}는 필요하지 않습니다. 아래 매도가에서 먼저
+                      팔고, 그 단계의 매도대금으로 아래 매수가에서 재매수합니다.
+                      수량은 단계별 최대 보유 수량이며 이익은 {currency}로
+                      남습니다.
                     </p>
                     <p>
                       평가 기준가{" "}
                       {money(confirm.strategy.config.inventory_reference_price)}{" "}
                       · 계좌 평균 매수가{" "}
-                      {money(confirm.strategy.config.inventory_average_price)}.
-                      운용 손익은 평가 기준가부터 계산하며 기존 보유 손익과
+                      {Number(
+                        confirm.strategy.config.inventory_average_price,
+                      ).toLocaleString("ko-KR")}{" "}
+                      {confirm.strategy.config.inventory_average_currency ||
+                        currency}
+                      . 운용 손익은 평가 기준가부터 계산하며 기존 보유 손익과
                       별도입니다.
                     </p>
                     <p>
-                      가격에 도달할 때 종목당 한 주문씩 처리합니다. 가격 범위
-                      아래에서도 매수·대기를 이어가며, 하루 손실·고점 대비 손실
-                      한도에 도달하면 주문을 중단하고 보유분을 유지합니다.
+                      {confirm.strategy.config.execution_policy === "maker_only"
+                        ? "메이커 전용 지정가를 단계별로 미리 올려 둡니다. 즉시 체결되는 가격이면 주문을 보류하며 가격을 쫓지 않습니다."
+                        : "가격에 도달할 때 종목당 한 주문씩 처리합니다."}{" "}
+                      가격 범위 아래에서도 매수·대기를 이어가며, 하루 손실·고점
+                      대비 손실 한도에 도달하면 주문을 중단하고 보유분을
+                      유지합니다.
                     </p>
                   </div>
                 )}
@@ -1399,7 +1461,7 @@ function CryptoAccountPanel({
   account: Data;
   onInventory: (asset: Data) => void;
 }) {
-  const { money } = useMarket();
+  const { money, currency } = useMarket();
   const snapshot = account.snapshot;
   const ready = account.status === "CONNECTED" && !account.stale;
   return (
@@ -1428,12 +1490,12 @@ function CryptoAccountPanel({
         <>
           <div className="metrics compact">
             <Metric
-              label="사용 가능한 원화"
+              label={`사용 가능한 ${currency}`}
               value={money(snapshot.cash_available)}
               sub={ready ? "계좌 사용 가능 잔액" : "마지막 조회 값 · 갱신 필요"}
             />
             <Metric
-              label="주문 등에 묶인 원화"
+              label={`주문 등에 묶인 ${currency}`}
               value={money(snapshot.cash_locked)}
               sub="기존 미체결 주문 등에 배정된 금액"
             />
@@ -1474,7 +1536,9 @@ function CryptoAccountPanel({
           <div className="card-actions">
             {snapshot.assets
               .filter(
-                (r: Data) => Number(r.balance) > 0 && r.unit_currency === "KRW",
+                (r: Data) =>
+                  Number(r.balance) > 0 &&
+                  !["KRW", "USDT"].includes(r.currency),
               )
               .map((r: Data) => (
                 <button
@@ -1513,7 +1577,7 @@ function AccountPanel({
   onInventory: (asset: Data) => void;
 }) {
   const { venue } = useMarket();
-  if (venue === "upbit")
+  if (isCrypto(venue))
     return <CryptoAccountPanel account={account} onInventory={onInventory} />;
   const snapshot = account.snapshot;
   const ready = account.status === "CONNECTED" && !account.stale;
@@ -1709,9 +1773,13 @@ function InventoryForm({
   onClose: () => void;
   onPrepare: (payload: Data) => void;
 }) {
-  const [basis, setBasis] = useState("average");
+  const { venue } = useMarket();
+  const targetVenue: Venue = asset.source ? "upbit_usdt" : venue;
+  const currency = marketInfo(targetVenue).currency;
+  const maker = targetVenue === "upbit_usdt";
+  const [basis, setBasis] = useState(maker ? "near_market" : "average");
   const [grids, setGrids] = useState(5);
-  const [step, setStep] = useState("2");
+  const [step, setStep] = useState(maker ? "0.75" : "2");
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
@@ -1723,7 +1791,15 @@ function InventoryForm({
         onSubmit={(e) => {
           e.preventDefault();
           onPrepare({
-            symbol: `KRW-${asset.currency}`,
+            symbol: `${currency}-${asset.currency}`,
+            execution_policy: maker ? "maker_only" : "trigger_limit",
+            ...(asset.source
+              ? {
+                  source_strategy_id: asset.source.id,
+                  source_version: asset.source.version,
+                  source_approval: asset.source.approval,
+                }
+              : {}),
             allocation: "all",
             first_sell_basis: basis,
             grids,
@@ -1751,13 +1827,23 @@ function InventoryForm({
         </p>
         <p>
           먼저 매도 → 한 단계 아래에서 같은 수량 재매수 → 원래 매도가에서
-          재매도합니다. 각 단계의 매도대금 안에서 반복하고 이익은 원화로
+          재매도합니다. 각 단계의 매도대금 안에서 반복하고 이익은 {currency}로
           남깁니다.
         </p>
+        {asset.source && (
+          <p className="banner">
+            기존 원화 전략을 종료하고 같은 SOL의 장부를 USDT 초안에 넘깁니다.
+            실제 매도·환전은 없으며 기존 원화 현금과 기록은 유지합니다. 새
+            전략의 시작은 별도 확인합니다.
+          </p>
+        )}
         <label>
           첫 매도 기준
           <select value={basis} onChange={(e) => setBasis(e.target.value)}>
-            <option value="average">평균 매수가와 수수료 이상</option>
+            <option value="near_market">현재 매도 호가보다 한 틱 위</option>
+            {!maker && (
+              <option value="average">평균 매수가와 수수료 이상</option>
+            )}
             <option value="market">현재가 한 단계 위</option>
           </select>
         </label>
@@ -1786,7 +1872,7 @@ function InventoryForm({
                 type="number"
                 min="0.5"
                 max="10"
-                step="0.1"
+                step="0.05"
                 required
                 value={step}
                 onChange={(e) => setStep(e.target.value)}
@@ -1795,14 +1881,16 @@ function InventoryForm({
           </div>
         </details>
         <p className="fine-print">
-          5단계·2%는 사용자가 조정할 수 있는 시작 예시이며 최적화 결과가
-          아닙니다. 주문별 최소 금액·수수료·호가 단위를 확인합니다. 추가 원화는
-          필요하지 않습니다.
+          5단계·{maker ? "0.75" : "2"}%는 조정할 수 있는 시작 예시이며 최적화
+          결과가 아닙니다. 주문별 최소 금액·수수료·호가 단위를 확인합니다. 추가
+          현금은 필요하지 않습니다.
         </p>
         <p className="fine-print">
-          초안은 주문을 시작하지 않습니다. 시작 후에는 가격이 도달할 때 한
-          주문씩 처리하고, 계좌 수량이 달라지거나 손실 한도에 도달하면
-          중단합니다.
+          초안은 주문을 시작하지 않습니다.{" "}
+          {maker
+            ? "시작 후에는 메이커 전용 지정가를 단계별로 미리 올립니다. 리워드는 실제 지급 전 수익에 포함하지 않습니다."
+            : "시작 후에는 가격이 도달할 때 한 주문씩 처리합니다."}{" "}
+          계좌 수량이 달라지거나 손실 한도에 도달하면 중단합니다.
         </p>
         <div className="card-actions">
           <button type="button" className="outline" onClick={onClose}>
@@ -1850,7 +1938,7 @@ function StrategyForm({
     rsi_exit: 55,
     max_spread_bps: "30",
     quote_max_age: 10,
-    commission_rate: "0.001",
+    commission_rate: venue === "upbit_usdt" ? "0.0025" : "0.001",
     slippage_bps: "10",
     ...initial,
   });
@@ -1922,15 +2010,11 @@ function StrategyForm({
           저장 후 주문 규모와 설정을 확인하고 실행할 수 있습니다.
         </p>
         <div className="form-grid">
-          {input(
-            "symbol",
-            venue === "upbit" ? "코인 거래쌍" : "미국 종목 코드",
-            {
-              placeholder: marketInfo(venue).example,
-              required: true,
-              autoCapitalize: "characters",
-            },
-          )}
+          {input("symbol", isCrypto(venue) ? "코인 거래쌍" : "미국 종목 코드", {
+            placeholder: marketInfo(venue).example,
+            required: true,
+            autoCapitalize: "characters",
+          })}
           {input("name", "전략 이름", { placeholder: "선택 사항" })}
           <label>
             전략
@@ -2222,7 +2306,7 @@ function Research({
               })
             }
           >
-            {venue === "upbit" ? "업비트" : "토스"}에서 수집 요청
+            {isCrypto(venue) ? "업비트" : "토스"}에서 수집 요청
           </button>
           <label className="outline file-button">
             CSV·JSON 가져오기
@@ -2357,7 +2441,7 @@ function Research({
           </div>
           <div className="form-grid">
             <label>
-              {venue === "upbit" ? "코인 거래쌍" : "미국 종목 코드"}
+              {isCrypto(venue) ? "코인 거래쌍" : "미국 종목 코드"}
               <input
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}

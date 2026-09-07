@@ -1,11 +1,26 @@
 from datetime import UTC, datetime
 
+from cotrader.markets import currency, is_upbit
 
-def account_view(row):
+
+def account_view(row, venue=None):
     if row is None:
         return {"status": "DISCONNECTED", "stale": True, "snapshot": None, "read_only": True}
     data = dict(row.data)
     snapshot = data.get("snapshot")
+    if snapshot and venue and is_upbit(venue):
+        unit = currency(venue)
+        balance = next((r for r in snapshot.get("balances", []) if r["currency"] == unit), None)
+        # Old KRW snapshots remain readable, but absent USDT data must never appear as zero.
+        if unit == "USDT" and "balances" not in snapshot:
+            return {"status": "DISCONNECTED", "stale": True, "snapshot": None, "read_only": True}
+        snapshot = {**snapshot, "venue": venue, "currency": unit}
+        if "balances" in snapshot:
+            snapshot.update(
+                cash_available=balance["balance"] if balance else "0",
+                cash_locked=balance["locked"] if balance else "0",
+            )
+        data["snapshot"] = snapshot
     checked = datetime.fromisoformat(snapshot["checked_at"]) if snapshot else None
     data["stale"] = not checked or (datetime.now(UTC) - checked).total_seconds() > 120
     return data
@@ -42,6 +57,7 @@ def crypto_account_message(data):
     if snapshot:
         lines += [
             f"사용 가능한 원화 {snapshot['cash_available']} KRW",
+            f"사용 가능한 USDT {next((r['balance'] for r in snapshot.get('balances', []) if r['currency'] == 'USDT'), '0')}",
             f"주문 등에 묶인 원화 {snapshot['cash_locked']} KRW",
             f"보유 코인 {len(snapshot['assets'])}종목",
             f"조회 시각 {snapshot['checked_at']}",

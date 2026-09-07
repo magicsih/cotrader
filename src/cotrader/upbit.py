@@ -1,4 +1,4 @@
-"""Upbit KRW quotes, account reads and explicitly enabled limit orders."""
+"""Upbit KRW/USDT quotes, account reads and explicitly enabled limit orders."""
 
 import asyncio
 import base64
@@ -14,7 +14,15 @@ import httpx
 
 from cotrader.broker import BrokerError
 from cotrader.domain import D, Quote
-from cotrader.markets import order_size_valid, price_tick, round_quantity, validate_symbol
+from cotrader.markets import (
+    currency,
+    is_upbit,
+    order_size_valid,
+    price_tick,
+    round_quantity,
+    upbit_venue,
+    validate_symbol,
+)
 
 
 def market_eligible(market):
@@ -54,8 +62,15 @@ class UpbitBroker:
     async def request(self, method, path, *, params=None, body=None, private=False):
         testing = method == "POST" and path == "/v1/orders/test" and private
         mutation = method != "GET" and not testing
-        if mutation and not self.settings.upbit_live_enabled:
+        if mutation and not (self.settings.upbit_live_enabled or self.settings.upbit_usdt_live_enabled):
             raise BrokerError("upbit-read-only")
+        if (
+            mutation
+            and body
+            and body.get("market")
+            and not self.settings.live_for(upbit_venue(body["market"]))
+        ):
+            raise BrokerError("upbit-market-read-only")
         allowed = {
             ("GET", "/v1/accounts"),
             ("GET", "/v1/orders/chance"),
@@ -92,7 +107,7 @@ class UpbitBroker:
                 raise BrokerError("upbit-unavailable", ambiguous=mutation) from None
 
     async def chance(self, symbol):
-        validate_symbol("upbit", symbol)
+        upbit_venue(symbol)
         return await self.request("GET", "/v1/orders/chance", params={"market": symbol}, private=True)
 
     async def orders(self, symbol=None):
@@ -100,7 +115,7 @@ class UpbitBroker:
         for page in range(1, 101):
             params = {"states[]": ["wait", "watch"], "page": page, "limit": 100, "order_by": "asc"}
             if symbol:
-                validate_symbol("upbit", symbol)
+                upbit_venue(symbol)
                 params["market"] = symbol
             batch = await self.request("GET", "/v1/orders/open", params=params, private=True)
             if not isinstance(batch, list):
@@ -110,7 +125,13 @@ class UpbitBroker:
                     raise BrokerError("upbit-order-pagination-changed")
                 seen.add(row["uuid"])
                 rows.append(
-                    {"orderId": row["uuid"], "symbol": row["market"], "identifier": row.get("identifier")}
+                    {
+                        "orderId": row["uuid"],
+                        "symbol": row["market"],
+                        "identifier": row.get("identifier"),
+                        "side": {"bid": "BUY", "ask": "SELL"}.get(row.get("side")),
+                        "price": row.get("price"),
+                    }
                 )
             if len(batch) < 100:
                 return rows
@@ -127,14 +148,14 @@ class UpbitBroker:
         )
         return normalize_order(raw)
 
-    def order_body(self, intent):
-        validate_symbol("upbit", intent.symbol)
+    def order_body(self, intent, *, maker_only=False):
+        validate_symbol(intent.venue, intent.symbol)
         if (
-            intent.venue != "upbit"
+            not is_upbit(intent.venue)
             or intent.side not in {"BUY", "SELL"}
-            or not order_size_valid(intent.quantity, intent.price, "upbit")
-            or intent.quantity != round_quantity(intent.quantity, "upbit")
-            or intent.price != price_tick(intent.price, "upbit")
+            or not order_size_valid(intent.quantity, intent.price, intent.venue)
+            or intent.quantity != round_quantity(intent.quantity, intent.venue)
+            or intent.price != price_tick(intent.price, intent.venue)
         ):
             raise ValueError("업비트 지정가 주문의 시장·방향·수량·호가 단위를 확인하세요")
         return {
@@ -144,16 +165,20 @@ class UpbitBroker:
             "price": format(intent.price.normalize(), "f"),
             "ord_type": "limit",
             "identifier": intent.id,
-            "smp_type": "cancel_taker",
+            **({"time_in_force": "post_only"} if maker_only else {"smp_type": "cancel_taker"}),
         }
 
-    async def test_order(self, intent):
-        await self.request("POST", "/v1/orders/test", body=self.order_body(intent), private=True)
+    async def test_order(self, intent, *, maker_only=False):
+        await self.request(
+            "POST", "/v1/orders/test", body=self.order_body(intent, maker_only=maker_only), private=True
+        )
         # A test UUID is never persisted as an actual order.
         return {"validated": True, "actual_order_created": False}
 
-    async def place(self, intent):
-        raw = await self.request("POST", "/v1/orders", body=self.order_body(intent), private=True)
+    async def place(self, intent, *, maker_only=False):
+        raw = await self.request(
+            "POST", "/v1/orders", body=self.order_body(intent, maker_only=maker_only), private=True
+        )
         if not isinstance(raw, dict) or not raw.get("uuid") or raw.get("identifier") != intent.id:
             raise BrokerError("upbit-invalid-submission", ambiguous=True)
         return {"orderId": raw["uuid"]}
@@ -163,13 +188,13 @@ class UpbitBroker:
 
     async def markets(self):
         rows = await self.request("GET", "/v1/market/all", params={"is_details": "true"})
-        return {r["market"]: r for r in rows if r["market"].startswith("KRW-")}
+        return {r["market"]: r for r in rows if r["market"].startswith(("KRW-", "USDT-"))}
 
     async def orderbooks(self, symbols):
         if not symbols:
             return []
         for symbol in symbols:
-            validate_symbol("upbit", symbol)
+            upbit_venue(symbol)
         rows = await self.request("GET", "/v1/orderbook", params={"markets": ",".join(symbols)})
         return [
             Quote(
@@ -185,7 +210,7 @@ class UpbitBroker:
         ]
 
     async def candles(self, symbol, interval="1m", before=None):
-        validate_symbol("upbit", symbol)
+        venue = upbit_venue(symbol)
         if interval not in {"1m", "1d"}:
             raise ValueError("1m 또는 1d만 지원합니다")
         path = "/v1/candles/minutes/1" if interval == "1m" else "/v1/candles/days"
@@ -196,7 +221,7 @@ class UpbitBroker:
         candles = [
             {
                 "timestamp": r["candle_date_time_utc"] + "+00:00",
-                "currency": "KRW",
+                "currency": currency(venue),
                 **dict(
                     zip(
                         ("openPrice", "highPrice", "lowPrice", "closePrice", "volume"),
@@ -219,7 +244,7 @@ class UpbitBroker:
         # The `to` boundary is exclusive; absent trade minutes are never fabricated.
         return {"candles": candles, "nextBefore": min((r["timestamp"] for r in candles), default=None)}
 
-    async def account_snapshot(self):
+    async def account_snapshot(self, venue="upbit"):
         rows = await self.request("GET", "/v1/accounts", private=True)
         if not isinstance(rows, list):
             raise BrokerError("upbit-invalid-account-response")
@@ -227,11 +252,14 @@ class UpbitBroker:
             {k: r[k] for k in ("currency", "balance", "locked", "avg_buy_price", "unit_currency")}
             for r in rows
         ]
-        krw = next((r for r in assets if r["currency"] == "KRW"), {"balance": "0", "locked": "0"})
+        cur = currency(venue)
+        cash = next((r for r in assets if r["currency"] == cur), {"balance": "0", "locked": "0"})
         return {
-            "venue": "upbit",
-            "cash_available": krw["balance"],
-            "cash_locked": krw["locked"],
+            "venue": venue,
+            "currency": cur,
+            "cash_available": cash["balance"],
+            "cash_locked": cash["locked"],
+            "balances": assets,
             "assets": [r for r in assets if r["currency"] != "KRW"],
             "checked_at": datetime.now(UTC).isoformat(),
         }

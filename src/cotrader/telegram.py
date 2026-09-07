@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy import select
 
 from cotrader.db import SingleWriter
-from cotrader.markets import VENUES, currency, portfolio_key
+from cotrader.markets import VENUES, currency, is_upbit, portfolio_key
 from cotrader.models import Event, RuntimeState, Strategy, now
 from cotrader.services import approval_digest, enqueue, put_runtime
 
@@ -242,7 +242,7 @@ class TelegramBot:
                 await self.send("저장된 전략이 없습니다. /web 에서 종목·예산·가격 범위를 먼저 설정하세요.")
             for row in rows:
                 c = row.config
-                unit = "개" if row.venue == "upbit" else "주"
+                unit = "개" if is_upbit(row.venue) else "주"
                 cur = currency(row.venue)
                 risk = self.settings.risk_for(row.venue)
                 details = f"{row.name} · {row.symbol} · {row.mode}\n상태 {row.status}\n예산 {c['budget']} {cur} · 전략 {c['kind']}\n"

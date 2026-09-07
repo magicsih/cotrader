@@ -15,7 +15,7 @@ from cotrader.auth import require_actor, session_token, telegram_user
 from cotrader.config import Settings
 from cotrader.db import database
 from cotrader.domain import Bar, StrategySpec, grid_quantity, levels
-from cotrader.markets import Venue, currency, portfolio_key, validate_symbol
+from cotrader.markets import Venue, currency, is_upbit, portfolio_key, validate_symbol
 from cotrader.models import BacktestJob, CandleRow, Command, Event, Intent, RuntimeState, Snapshot, Strategy
 from cotrader.research import OptimizationOptions
 from cotrader.services import approval_digest, create_strategy, enqueue
@@ -163,7 +163,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
     @app.get("/api/status")
     async def status(_actor: Actor, venue: Venue = "toss"):
         async with sessions() as session:
-            runtime = await session.get(RuntimeState, "engine:upbit" if venue == "upbit" else "engine")
+            runtime = await session.get(RuntimeState, "engine:upbit" if is_upbit(venue) else "engine")
             telegram = await session.get(RuntimeState, "telegram")
             return {
                 "engine": serialize(runtime) if runtime else None,
@@ -174,7 +174,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                 "daily_loss": settings.risk_for(venue)["daily_loss"],
                 "drawdown": settings.risk_for(venue)["drawdown"],
                 "market_source": ("upbit" if settings.upbit_enabled else "offline")
-                if venue == "upbit"
+                if is_upbit(venue)
                 else settings.market_source,
                 "telegram": serialize(telegram) if telegram else None,
             }
@@ -184,9 +184,13 @@ def create_app(settings: Settings | None = None, sessions_override=None):
         from cotrader.account import account_view
 
         async with sessions() as session:
-            return account_view(
-                await session.get(RuntimeState, "upbit_account" if venue == "upbit" else "broker_account")
+            data = account_view(
+                await session.get(RuntimeState, "upbit_account" if is_upbit(venue) else "broker_account"),
+                venue,
             )
+            if is_upbit(venue):
+                data["read_only"] = not settings.live_for(venue)
+            return data
 
     @app.get("/api/portfolio")
     async def portfolio(_actor: Actor, mode: Literal["paper", "live"] = "paper", venue: Venue = "toss"):
@@ -221,7 +225,7 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             "maximum_budget": str(body.spec.budget),
             "mode": body.mode,
             "loss_action": "대기 주문 취소·보유 유지·알림",
-            "sessions": "24시간" if body.spec.venue == "upbit" else "토스 지원 전체 세션",
+            "sessions": "24시간" if is_upbit(body.spec.venue) else "토스 지원 전체 세션",
             "currency": currency(body.spec.venue),
             "costs": "모의 수수료와 체결 비용은 설정값이며 실제 비용과 다를 수 있습니다",
         }

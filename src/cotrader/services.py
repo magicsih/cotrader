@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from cotrader.domain import ACTIVE_ORDERS, D, StrategySpec, apply_fill, funded_state, initial_state
-from cotrader.markets import VENUES, currency, portfolio_key, validate_symbol
+from cotrader.markets import VENUES, asset_key, currency, is_upbit, portfolio_key, validate_symbol
 from cotrader.models import AccountState, Command, Event, Intent, Ledger, RuntimeState, Strategy, now
 
 
@@ -42,6 +42,10 @@ async def bootstrap(session, settings):
                         mode=mode, venue=venue, capital=capital, high_water=capital, daily_anchor=capital
                     )
                 )
+
+
+def settlement_value(strategy):
+    return D(strategy.state["cash"]) + D(strategy.state.get("released_value", "0"))
 
 
 async def create_strategy(session, name: str, spec: StrategySpec, mode: str):
@@ -99,7 +103,7 @@ async def process_command(session, command, settings, *, live_checked=False):
         if row.status == "ARCHIVED":
             raise ValueError("종료된 전략은 재개할 수 없습니다. 새 초안을 만드세요")
         spec = StrategySpec.model_validate(row.config)
-        if spec.venue == "upbit" and not settings.upbit_enabled:
+        if is_upbit(spec.venue) and not settings.upbit_enabled:
             raise ValueError("업비트 시세 연결이 필요합니다")
         if row.mode == "live" and not settings.live_for(row.venue):
             raise ValueError("서버에서 실거래 실행을 허용하지 않았습니다")
@@ -116,18 +120,16 @@ async def process_command(session, command, settings, *, live_checked=False):
         if unresolved:
             raise ValueError("결과가 확인되지 않은 주문을 먼저 대조해야 합니다")
         others = (
-            await session.scalars(
-                select(Strategy).where(
-                    Strategy.id != row.id, Strategy.mode == row.mode, Strategy.venue == row.venue
-                )
-            )
+            await session.scalars(select(Strategy).where(Strategy.id != row.id, Strategy.mode == row.mode))
         ).all()
         funded = [s for s in others if s.state.get("funded")]
-        if any(s.symbol == row.symbol for s in funded):
+        if any(asset_key(s.venue, s.symbol) == asset_key(row.venue, row.symbol) for s in funded):
             raise ValueError("같은 종목은 한 전략만 자금을 배정할 수 있습니다")
+        others = [s for s in others if s.venue == row.venue]
+        funded = [s for s in funded if s.venue == row.venue]
         allocated = sum((D(s.config["budget"]) for s in funded), D(0))
         settled_pnl = sum(
-            (D(s.state["cash"]) - D(s.config["budget"]) for s in others if s.state.get("settled")), D(0)
+            (settlement_value(s) - D(s.config["budget"]) for s in others if s.state.get("settled")), D(0)
         )
         available_capital = min(account.capital, account.capital + settled_pnl)
         if not row.state.get("funded") and allocated + spec.budget > available_capital:
@@ -135,7 +137,9 @@ async def process_command(session, command, settings, *, live_checked=False):
         if len(funded) >= 5:
             raise ValueError("첫 버전은 최대 5개 종목까지 동시에 운영합니다")
         state = (
-            funded_state(spec) if spec.inventory_quantity and not row.state.get("funded") else dict(row.state)
+            {**row.state, **funded_state(spec)}
+            if spec.inventory_quantity and not row.state.get("funded")
+            else dict(row.state)
         )
         state.update(funded=True, last_mid=None, last_bar=None)
         row.state, row.status, row.reason = state, "RUNNING", "시세·계좌 확인 대기"
@@ -211,7 +215,7 @@ async def process_command(session, command, settings, *, live_checked=False):
         if venue not in VENUES:
             raise ValueError("지원하지 않는 시장입니다")
         validate_symbol(venue, payload.get("symbol", ""))
-        if venue == "upbit" and not settings.upbit_enabled:
+        if is_upbit(venue) and not settings.upbit_enabled:
             raise ValueError("업비트 시세 연결이 비활성입니다")
         if payload.get("interval", "1m") not in {"1m", "1d"}:
             raise ValueError("1m 또는 1d만 지원합니다")
@@ -289,7 +293,7 @@ async def record_execution(session, intent: Intent, order: dict):
             Event(
                 kind="fill",
                 strategy_id=row.id,
-                message=f"{row.mode} · {row.symbol} {intent.side} {delta_quantity}{'개' if row.venue == 'upbit' else '주'} 체결",
+                message=f"{row.mode} · {row.symbol} {intent.side} {delta_quantity}{'개' if is_upbit(row.venue) else '주'} 체결",
                 data={
                     "intent_id": intent.id,
                     "quantity": str(delta_quantity),
@@ -324,6 +328,8 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
         allocated = sum((D(s.config["budget"]) for s in funded), D(0))
         cash = account.capital - allocated + sum((D(s.state["cash"]) for s in funded), D(0))
         cash += sum((D(s.state["cash"]) - D(s.config["budget"]) for s in settled), D(0))
+        released = sum((D(s.state.get("released_value", "0")) for s in settled), D(0))
+        closed_unrealized = sum((D(s.state.get("closed_unrealized", "0")) for s in settled), D(0))
         exposure, basis, costs, realized = D(0), D(0), D(0), D(0)
         complete = True
         for strategy in settled:
@@ -358,7 +364,7 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
             basis += D(strategy.state["cost_basis"])
             costs += D(strategy.state["costs"])
             realized += D(strategy.state["realized"])
-        value = cash + exposure
+        value = cash + exposure + released
         if complete:
             if trading_day and trading_day != account.trading_day:
                 account.trading_day, account.daily_anchor = trading_day, value
@@ -393,11 +399,13 @@ async def check_risk(session, settings, quotes, trading_day: str, venue="toss"):
             "currency": currency(venue),
             "capital": str(account.capital),
             "cash": str(cash),
+            "released_value": str(released),
+            "closed_unrealized": str(closed_unrealized),
             "equity": str(value) if complete else None,
             "exposure": str(exposure) if complete else None,
             "realized_gross": str(realized),
             "costs": str(costs),
-            "unrealized": str(exposure - basis) if complete else None,
+            "unrealized": str(exposure - basis + closed_unrealized) if complete else None,
             "complete": complete,
             "pending_orders": pending,
             "high_water": str(account.high_water),

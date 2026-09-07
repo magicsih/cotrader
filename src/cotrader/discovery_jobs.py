@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from cotrader.discovery import ACTIVE_DISCOVERIES, UNIVERSES, discover, research_window
 from cotrader.domain import Bar, D
+from cotrader.markets import is_upbit
 from cotrader.models import CandleRow, Command, DiscoveryPlan, DiscoveryRun, Event, now, uid
 from cotrader.research import ResearchCancelled
 
@@ -19,7 +20,7 @@ def plan_request(settings, venue, budget, preference):
         "preference": preference,
         "symbols": [r["symbol"] for r in UNIVERSES[venue]],
         "risk": settings.risk_for(venue),
-        "commission_rate": "0.001",
+        "commission_rate": "0.0025" if venue == "upbit_usdt" else "0.001",
         "slippage_bps": "10",
         "version": 1,
     }
@@ -80,7 +81,7 @@ async def schedule_due(settings, sessions):
             )
         ).all()
         for plan in plans:
-            if (plan.venue == "upbit" and not settings.upbit_enabled) or (
+            if (is_upbit(plan.venue) and not settings.upbit_enabled) or (
                 plan.venue == "toss" and settings.market_source != "toss"
             ):
                 plan.enabled, plan.next_run_at = False, None

@@ -10,7 +10,7 @@ from cotrader.auth import require_actor
 from cotrader.discovery import ACTIVE_DISCOVERIES, LOOKBACK_DAYS, UNIVERSES
 from cotrader.discovery_jobs import create_run, plan_request
 from cotrader.domain import StrategySpec
-from cotrader.markets import Venue
+from cotrader.markets import Venue, is_upbit
 from cotrader.models import AccountState, Command, DiscoveryPlan, DiscoveryRun, Event, Strategy, now
 from cotrader.services import create_strategy
 
@@ -46,7 +46,12 @@ def discovery_routes(settings, sessions, serialize):
                     "universe": UNIVERSES[venue],
                     "lookback_days": LOOKBACK_DAYS,
                     "budget": str(
-                        min(settings.capital_for(venue), Decimal(10000000 if venue == "upbit" else 5000))
+                        min(
+                            settings.capital_for(venue),
+                            Decimal(
+                                10000000 if venue == "upbit" else 10000 if venue == "upbit_usdt" else 5000
+                            ),
+                        )
                     ),
                     "risk": settings.risk_for(venue),
                 },
@@ -54,12 +59,13 @@ def discovery_routes(settings, sessions, serialize):
 
     @router.post("/api/discoveries", status_code=202)
     async def start(body: DiscoveryInput, actor: Actor):
-        if (body.venue == "upbit" and not settings.upbit_enabled) or (
+        if (is_upbit(body.venue) and not settings.upbit_enabled) or (
             body.venue == "toss" and settings.market_source != "toss"
         ):
             raise ValueError("선택한 시장의 시세 연결이 비활성입니다")
         if body.budget > min(
-            settings.capital_for(body.venue), Decimal(10000000 if body.venue == "upbit" else 5000)
+            settings.capital_for(body.venue),
+            Decimal(10000000 if body.venue == "upbit" else 10000 if body.venue == "upbit_usdt" else 5000),
         ):
             raise ValueError("서버의 시장별 모의 예산 한도를 넘을 수 없습니다")
         request = plan_request(settings, body.venue, body.budget, body.preference)

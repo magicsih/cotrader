@@ -44,6 +44,7 @@ def main():
     if args.connect:
         options["live_enabled"] = False
         options["upbit_live_enabled"] = False
+        options["upbit_usdt_live_enabled"] = False
     if args.connect and args.role in {"api", "engine"}:
         filename = "telegram.env" if args.role == "api" else "openapi.env"
         path = Path.home() / ".config/tossinvest" / filename
