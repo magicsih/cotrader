@@ -1,6 +1,6 @@
 # 실거래 준비와 운영
 
-토스 미국 주식·일반 ETF와 업비트 KRW 코인을 지정가로 운용한다. 공개 배포 예제는 두 시장의 실거래가 기본 꺼짐이다. 운영 설정과 실제 전략 시작은 별도이며 설정 변경만으로 새 전략을 만들거나 자금을 배정하지 않는다.
+토스 미국 주식·일반 ETF와 업비트 KRW·USDT 코인을 지정가로 운용한다. 공개 배포 예제는 모든 시장의 실거래가 기본 꺼짐이다. 운영 설정과 실제 전략 시작은 별도이며 설정 변경만으로 새 전략을 만들거나 자금을 배정하지 않는다.
 
 ## 시작 절차
 
@@ -32,7 +32,7 @@
 - 토스: `COTRADER_LIVE_ENABLED=true`, `COTRADER_MARKET_SOURCE=toss`, 외부 인증과 기존 계좌 선택.
 - 업비트: `COTRADER_UPBIT_ENABLED=true`, `COTRADER_UPBIT_LIVE_ENABLED=true`, 외부 인증. 기존 키에 자산조회·주문조회·주문하기 권한과 클러스터 출발지 IP 허용이 필요하다.
 - API와 engine에 같은 비밀이 아닌 운영 설정을 적용한다. 거래소 키는 engine에만 주입한다. research에는 거래소 키가 없다.
-- 로컬 `--connect`는 두 시장의 실거래를 잠근다. 출금·입금·대량 취소·자동 환전 경로는 제공하지 않는다.
+- 로컬 `--connect`는 모든 시장의 실거래를 잠근다. 출금·입금·대량 취소·자동 환전 경로는 제공하지 않는다.
 - 실거래 플래그를 끄기 전 전략을 중단하고 미체결 취소 완료를 확인한다. 플래그를 끄는 것만으로 거래소의 주문이 사라지지 않는다.
 
 ## 체결과 장애 대응
@@ -48,3 +48,5 @@
 자동 테스트는 서명, 시장별 권한 분리, 잔고·수수료·수동 주문, 부분 체결, 중복 반영, 취소, 통신 오류, 식별자 복구를 확인한다. 업비트의 `/v1/orders/test`는 실제 주문을 생성하지 않으며 반환 UUID는 체결·취소 검증에 쓸 수 없다. 테스트 통과는 실제 체결·운영 수익성의 증거가 아니다. 최초 실제 주문은 사용자가 웹에서 전략과 예산을 확인하여 시작한다.
 
 공식 근거: [업비트 인증](https://docs.upbit.com/kr/reference/auth), [주문 생성](https://docs.upbit.com/kr/reference/new-order), [주문 테스트](https://docs.upbit.com/kr/reference/order-test), [주문 조회](https://docs.upbit.com/kr/reference/get-order), [취소 접수](https://docs.upbit.com/kr/reference/cancel-order), [주문 가능 정보](https://docs.upbit.com/kr/reference/available-order-information), [토스 가이드](https://developers.tossinvest.com/docs).
+
+USDT 보유 그리드의 메이커 전용 주문·원화 보유 이관·별도 서버 허용은 [USDT 운용 안내](usdt-grid.md)를 따른다. 이 방식은 단계별 대기 주문을 두고 60초 만료를 적용하지 않는다.
