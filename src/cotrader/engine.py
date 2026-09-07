@@ -267,7 +267,7 @@ class Engine:
         source = None
         if request.source_strategy_id:
             source = next((row for row in funded if row.id == request.source_strategy_id), None)
-            if not source or source.venue == venue or source.status == "ARCHIVED":
+            if not source or source.status == "ARCHIVED":
                 raise ValueError("이관할 기존 전략·보유 코인을 확인하세요")
             if request.source_version != source.version or request.source_approval != approval_digest(
                 source, self.settings
@@ -277,6 +277,31 @@ class Engine:
                 raise ValueError("기존 전략을 중단하고 미체결 대조가 끝난 후 보유를 이관하세요")
         elif request.source_version is not None or request.source_approval is not None:
             raise ValueError("이관할 기존 전략 ID가 필요합니다")
+        target = None
+        if request.target_strategy_id:
+            target = next((row for row in existing if row.id == request.target_strategy_id), None)
+            if (
+                not source
+                or not target
+                or target is source
+                or target.venue != venue
+                or target.symbol != request.symbol
+                or target.status != "DRAFT"
+                or target.state.get("funded")
+                or target.state.get("settled")
+                or target.state.get("transferred_from")
+                or D(target.state["quantity"]) != 0
+                or D(target.state["cash"]) != 0
+            ):
+                raise ValueError("인계받을 전략은 보유·현금 배정 전의 같은 종목 실거래 초안이어야 합니다")
+            if request.target_version != target.version or request.target_approval != approval_digest(
+                target, self.settings
+            ):
+                raise ValueError("새 초안 설정이 변경되었습니다. 인계 내용을 다시 확인하세요")
+            if await session.scalar(select(Intent.id).where(Intent.strategy_id == target.id)):
+                raise ValueError("주문 기록이 있는 전략에는 보유를 인계할 수 없습니다")
+        elif request.target_version is not None or request.target_approval is not None:
+            raise ValueError("인계받을 초안 ID가 필요합니다")
         if any(row is not source for row in funded):
             raise ValueError("같은 코인을 이미 운용하는 전략이 있습니다")
         if await session.scalar(
@@ -292,7 +317,30 @@ class Engine:
         quotes = await self.upbit.orderbooks([request.symbol])
         if not quotes:
             raise ValueError("최신 호가를 확인할 수 없습니다")
-        spec = inventory_grid_spec(request, chance, quotes[0])
+        if target:
+            approved = StrategySpec.model_validate(target.config)
+            _, sellable, quantity = upbit_policy(
+                chance,
+                request.symbol,
+                approved.commission_rate,
+                maker_only=approved.execution_policy == "maker_only",
+            )
+            if (
+                not approved.inventory_quantity
+                or sellable != quantity
+                or quantity != approved.inventory_quantity
+            ):
+                raise ValueError("새 초안의 편입 수량과 현재 매도 가능 전량이 다릅니다")
+            # Preserve the reviewed price table; refresh only the inventory valuation.
+            spec = StrategySpec.model_validate(
+                {
+                    **target.config,
+                    "budget": quantity * quotes[0].bid,
+                    "inventory_reference_price": quotes[0].bid,
+                }
+            )
+        else:
+            spec = inventory_grid_spec(request, chance, quotes[0])
         draft = Strategy(
             venue=venue,
             mode="live",
@@ -304,8 +352,23 @@ class Engine:
         account = await session.get(AccountState, {"venue": venue, "mode": "live"})
         if account.halted:
             raise ValueError("새 시장의 위험 중단 상태를 확인한 후 이관하세요")
+        released_value = D(0)
+        if source:
+            if D(source.state["quantity"]) != spec.inventory_quantity:
+                raise ValueError("기존 장부와 실제 보유 수량이 다릅니다")
+            source_quotes = quotes if source.venue == venue else await self.upbit.orderbooks([source.symbol])
+            if not source_quotes or not source_quotes[0].valid(
+                StrategySpec.model_validate(source.config), datetime.now(UTC)
+            ):
+                raise ValueError("기존 시장의 최신 평가 가격을 확인할 수 없습니다")
+            released_value = spec.inventory_quantity * source_quotes[0].bid
         allocated = sum(
-            (D(r.config["budget"]) for r in existing if r.venue == venue and r.state.get("funded")), D(0)
+            (
+                D(r.config["budget"])
+                for r in existing
+                if r is not source and r.venue == venue and r.state.get("funded")
+            ),
+            D(0),
         )
         settled = sum(
             (
@@ -315,21 +378,18 @@ class Engine:
             ),
             D(0),
         )
+        if source and source.venue == venue:
+            settled += D(source.state["cash"]) + released_value - D(source.config["budget"])
         if spec.budget + allocated > min(account.capital, account.capital + settled):
             raise ValueError("새 시장의 배정 가능한 예산보다 보유 평가액이 큽니다")
-        released_value = D(0)
-        if source:
-            if D(source.state["quantity"]) != spec.inventory_quantity:
-                raise ValueError("기존 장부와 실제 보유 수량이 다릅니다")
-            source_quotes = await self.upbit.orderbooks([source.symbol])
-            if not source_quotes or not source_quotes[0].valid(
-                StrategySpec.model_validate(source.config), datetime.now(UTC)
-            ):
-                raise ValueError("기존 시장의 최신 평가 가격을 확인할 수 없습니다")
-            released_value = spec.inventory_quantity * source_quotes[0].bid
         # All broker checks precede book mutation; no sale, commission or FX is recorded.
-        row = await create_strategy(session, f"{spec.symbol} 보유 전량 반복 그리드", spec, "live")
+        row = target or await create_strategy(session, f"{spec.symbol} 보유 전량 반복 그리드", spec, "live")
+        if target:
+            target.config = spec.model_dump(mode="json")
+            target.version += 1
+        row.reason = "보유 장부 인계 완료 — 설정 확인·시작 대기" if source else row.reason
         if source:
+            source_state = dict(source.state)
             source.state = {
                 **source.state,
                 "funded": False,
@@ -355,6 +415,8 @@ class Engine:
                         "quantity": str(spec.inventory_quantity),
                         "valuation": str(released_value),
                         "currency": currency(source.venue),
+                        "source_state": source_state,
+                        "actual_order_created": False,
                     },
                     notify=True,
                 )

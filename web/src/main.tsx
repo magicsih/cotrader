@@ -1271,9 +1271,9 @@ function App({
           )}
           {Number(portfolio?.released_value) > 0 && (
             <p className="banner">
-              총 평가에는 다른 시장으로 이관한 보유분의 당시 평가액{" "}
+              총 평가에는 종료 전략에서 인계한 보유분의 당시 평가액{" "}
               {money(portfolio?.released_value)}이 포함됩니다. 사용 가능한
-              현금이 아니며 이관 이후 변동은 새 시장에 기록됩니다.
+              현금이 아니며 인계 이후 변동은 새 전략에 기록됩니다.
             </p>
           )}
           <footer>
@@ -1976,6 +1976,66 @@ function Empty({
         </button>
       )}
     </div>
+  );
+}
+
+function InventoryHandoverAction({
+  strategy,
+  strategies,
+  busy,
+  onConfirm,
+}: {
+  strategy: Data;
+  strategies: Data[];
+  busy: boolean;
+  onConfirm: (value: Data) => void;
+}) {
+  if (
+    !["upbit", "upbit_usdt"].includes(strategy.venue) ||
+    strategy.mode !== "live" ||
+    strategy.status !== "DRAFT" ||
+    strategy.state.funded ||
+    strategy.state.transferred_from ||
+    !Number(strategy.config.inventory_quantity)
+  )
+    return null;
+  const source = strategies.find(
+    (row) =>
+      row.id !== strategy.id &&
+      row.mode === "live" &&
+      row.state.funded &&
+      row.venue === strategy.venue &&
+      row.symbol === strategy.symbol &&
+      Number(row.state.quantity) > 0,
+  );
+  if (!source) return null;
+  return (
+    <button
+      className="outline"
+      disabled={busy || source.status === "RUNNING"}
+      onClick={() =>
+        onConfirm({
+          action: "prepare_inventory",
+          title: "기존 전략의 보유 장부를 인계할까요?",
+          detail: `${source.name}을 종료하고 ${strategy.name}에 ${source.state.quantity}개를 인계합니다. 가격표는 유지하고 평가액은 최신 호가로 갱신합니다. 기존 현금·체결·손익 기록은 종료 전략에 보존합니다. 실제 매매는 없으며 새 전략 시작은 별도입니다.`,
+          payload: {
+            symbol: strategy.symbol,
+            allocation: "all",
+            first_sell_basis: "near_market",
+            source_strategy_id: source.id,
+            source_version: source.version,
+            source_approval: source.approval,
+            target_strategy_id: strategy.id,
+            target_version: strategy.version,
+            target_approval: strategy.approval,
+          },
+        })
+      }
+    >
+      {source.status === "RUNNING"
+        ? "기존 전략 중단 후 인계 가능"
+        : "기존 전략 보유 인계"}
+    </button>
   );
 }
 
