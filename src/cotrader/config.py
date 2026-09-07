@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     telegram_enabled: bool = False
     upbit_enabled: bool = False
     upbit_account_reads_enabled: bool = False
+    upbit_account_label: str = Field(default="업비트 연결 계좌", min_length=1, max_length=60)
     capital_krw: Decimal = Field(default=Decimal("1000000"), gt=0, le=10000000)
     daily_loss_krw: Decimal = Field(default=Decimal("10000"), gt=0)
     drawdown_krw: Decimal = Field(default=Decimal("50000"), gt=0)
