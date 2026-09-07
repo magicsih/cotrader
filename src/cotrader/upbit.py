@@ -261,6 +261,7 @@ class UpbitBroker:
         cur = currency(venue)
         cash = next((r for r in assets if r["currency"] == cur), {"balance": "0", "locked": "0"})
         return {
+            "account_label": self.settings.upbit_account_label,
             "venue": venue,
             "currency": cur,
             "cash_available": cash["balance"],
