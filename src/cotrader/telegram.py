@@ -2,13 +2,18 @@ import asyncio
 import logging
 import time
 from datetime import timedelta
+from uuid import UUID
 
 import httpx
 from sqlalchemy import select
 
+from cotrader import telegram_views as view
+from cotrader.account import account_view
 from cotrader.db import SingleWriter
-from cotrader.markets import VENUES, currency, is_upbit, portfolio_key
-from cotrader.models import Event, RuntimeState, Strategy, now
+from cotrader.domain import ACTIVE_ORDERS
+from cotrader.markets import VENUES, portfolio_key
+from cotrader.models import Command, DiscoveryRun, Event, Intent, RuntimeState, Strategy, now
+from cotrader.profit import profit_summary
 from cotrader.services import approval_digest, enqueue, put_runtime
 
 LOG = logging.getLogger(__name__)
@@ -28,17 +33,28 @@ class TelegramBot:
         try:
             response = await self.client.post(method, json=payload)
             data = response.json()
+            if method == "editMessageText" and str(data.get("description", "")).startswith(
+                "Bad Request: message is not modified"
+            ):
+                return None
             if response.status_code != 200 or not data.get("ok"):
                 raise RuntimeError(f"telegram-http-{response.status_code}")
             return data["result"]
         except (httpx.HTTPError, ValueError):
             raise RuntimeError("telegram-unavailable") from None
 
-    async def send(self, message, buttons=None):
-        payload = {"chat_id": self.settings.telegram_me, "text": message[:4000]}
-        if buttons:
-            payload["reply_markup"] = {"inline_keyboard": buttons}
-        receipt = await self.call("sendMessage", payload)
+    async def send(self, blocks, buttons=None, message_id=None):
+        if isinstance(blocks, str):
+            blocks = [view.paragraph(blocks)]
+        payload = {
+            "chat_id": self.settings.telegram_me,
+            "rich_message": {"blocks": blocks},
+            "reply_markup": {"inline_keyboard": buttons or []},
+        }
+        if message_id is not None:
+            await self.call("editMessageText", {**payload, "message_id": message_id})
+            return
+        receipt = await self.call("sendRichMessage", payload)
         async with self.sessions.begin() as session:
             await put_runtime(session, "telegram_delivery", {"message_id": receipt["message_id"]})
 
@@ -71,23 +87,16 @@ class TelegramBot:
                         "scope": {"type": "chat", "chat_id": self.settings.telegram_me},
                         "commands": [
                             {"command": command, "description": description}
-                            for command, description in (
-                                ("status", "봇 상태와 운용 손익"),
-                                ("account", "토스 실제 계좌 조회"),
-                                ("crypto", "업비트 실제 계좌 조회"),
-                                ("guide", "종목별 시작 가이드"),
-                                ("strategies", "전략 확인과 승인"),
-                                ("pause", "전체 주문 중단"),
-                                ("web", "통계 화면 안내"),
-                                ("help", "사용 방법"),
-                            )
+                            for command, description in view.COMMANDS
                         ],
                     },
                 )
+                await self.call(
+                    "setChatMenuButton",
+                    {"chat_id": self.settings.telegram_me, "menu_button": {"type": "commands"}},
+                )
                 if first_connection:
-                    await self.send(
-                        "Cotrader 텔레그램 연결을 확인했습니다.\n/account 실제 계좌 조회\n/status 봇 상태\n/help 사용 방법\n현재 실거래 주문은 비활성화되어 있습니다."
-                    )
+                    await self.screen("menu")
                 while True:
                     await lock.verify()
                     try:
@@ -123,6 +132,115 @@ class TelegramBot:
         async with self.sessions.begin() as session:
             await put_runtime(session, "telegram", {"status": status, **data})
 
+    async def pending_settings(self, session, strategy):
+        commands = (
+            await session.scalars(
+                select(Command).where(
+                    Command.action.in_(["set_market_cautions", "set_usdt_capital"]),
+                    Command.status.in_(["QUEUED", "RUNNING"]),
+                )
+            )
+        ).all()
+        return any(
+            (c.action == "set_market_cautions" and c.payload.get("strategy_id") == strategy.id)
+            or (c.action == "set_usdt_capital" and strategy.venue == "upbit_usdt" and strategy.mode == "live")
+            for c in commands
+        )
+
+    async def screen(self, name, page=0, message_id=None, strategy_id=None, notice=None, research_id=None):
+        async with self.sessions() as session:
+            if name in {"menu", "help"}:
+                blocks, buttons = view.menu()
+                if name == "help":
+                    blocks += [
+                        view.paragraph(
+                            "\n".join(f"/{cmd} · {description}" for cmd, description in view.COMMANDS)
+                        ),
+                        view.footer(
+                            "/crypto는 /pocket, /account는 /toss와 같습니다. 새로고침은 최근 계좌 조회 값을 다시 표시합니다.\n/pause는 전체 중단을 요청하며 보유 자산은 매도하지 않습니다."
+                        ),
+                    ]
+            elif name in {"pocket", "toss"}:
+                key = "upbit_account" if name == "pocket" else "broker_account"
+                data = account_view(await session.get(RuntimeState, key))
+                blocks, buttons = getattr(view, name)(data, page)
+            elif name == "profit":
+                blocks, buttons = view.profit(await profit_summary(session))
+            elif name == "status":
+                blocks, buttons = view.status(
+                    await session.get(RuntimeState, "engine"),
+                    await session.get(RuntimeState, "engine:upbit"),
+                    [
+                        await session.get(RuntimeState, portfolio_key(venue, mode))
+                        for venue in VENUES
+                        for mode in ("paper", "live")
+                    ],
+                )
+            elif name == "strategies":
+                rows = (
+                    await session.scalars(
+                        select(Strategy)
+                        .where(Strategy.status != "ARCHIVED")
+                        .order_by(Strategy.created_at, Strategy.id)
+                    )
+                ).all()
+                blocks, buttons = view.strategies(rows, page)
+            elif name == "detail":
+                row = await session.get(Strategy, strategy_id)
+                if not row or row.status == "ARCHIVED":
+                    blocks, buttons = (
+                        [view.paragraph("전략이 없거나 보관되었습니다.")],
+                        view.nav("strategies"),
+                    )
+                else:
+                    blocks, buttons = view.strategy(
+                        row, self.settings, await self.pending_settings(session, row), notice
+                    )
+            elif name == "orders":
+                rows = (
+                    await session.scalars(
+                        select(Intent)
+                        .where(Intent.mode == "live", Intent.status.in_(ACTIVE_ORDERS))
+                        .order_by(Intent.created_at.desc(), Intent.id)
+                    )
+                ).all()
+                blocks, buttons = view.orders(rows, page)
+            elif name == "research":
+                row = (
+                    await session.get(DiscoveryRun, research_id)
+                    if research_id
+                    else await session.scalar(
+                        select(DiscoveryRun)
+                        .where(DiscoveryRun.venue == "toss")
+                        .order_by(DiscoveryRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                blocks, buttons = view.research(row, self.settings.public_url)
+            elif name in {"web", "guide"}:
+                if not self.settings.public_url.startswith("https://"):
+                    blocks, buttons = (
+                        [view.paragraph("휴대폰용 웹 화면은 HTTPS 주소와 인증 설정 후 연결됩니다.")],
+                        view.nav("menu"),
+                    )
+                else:
+                    url = self.settings.public_url + ("/guide" if name == "guide" else "")
+                    control = (
+                        {"web_app": {"url": url}} if self.settings.auth_mode == "telegram" else {"url": url}
+                    )
+                    blocks = [
+                        view.heading("Cotrader 웹 화면"),
+                        view.paragraph("연결된 본인 계정으로 로그인해 상세 설정과 통계를 확인하세요."),
+                    ]
+                    buttons = [
+                        [{"text": "가이드 열기" if name == "guide" else "Cotrader 열기", **control}],
+                        *view.nav("menu"),
+                    ]
+            else:
+                blocks, buttons = view.menu()
+                blocks.insert(1, view.paragraph("알 수 없는 명령입니다. 아래 메뉴를 선택하세요."))
+        await self.send(blocks, buttons, message_id=message_id)
+
     async def handle(self, update):
         callback = update.get("callback_query")
         message = callback.get("message", {}) if callback else update.get("message", {})
@@ -134,147 +252,67 @@ class TelegramBot:
         ):
             return
         if callback:
-            if message.get("date", 0) < self.started_at:
-                await self.call(
-                    "answerCallbackQuery",
-                    {
-                        "callback_query_id": callback["id"],
-                        "text": "/strategies로 최신 승인 버튼을 다시 열어주세요.",
-                    },
+            parts = callback.get("data", "").split(":")
+            # Read-only navigation remains usable after a restart; approvals do not.
+            await self.call("answerCallbackQuery", {"callback_query_id": callback["id"]})
+            if len(parts) == 3 and parts[0] == "nav" and parts[2].isdigit() and len(parts[2]) <= 6:
+                await self.screen(parts[1], int(parts[2]), message.get("message_id"))
+                return
+            if parts[0] in {"detail", "research"} and len(parts) == 2:
+                try:
+                    strategy_id = str(UUID(parts[1]))
+                except ValueError:
+                    return
+                await self.screen(
+                    parts[0],
+                    message_id=message.get("message_id"),
+                    **{("strategy_id" if parts[0] == "detail" else "research_id"): strategy_id},
                 )
                 return
-            data = callback.get("data", "").split(":")
-            if data[0] in {"start", "pause"} and len(data) >= 2:
-                payload = {"strategy_id": data[1]}
-                if data[0] == "start":
-                    if len(data) != 4 or not data[2].isdigit():
+            if parts[0] not in {"run", "start", "pause"} or len(parts) < 2:
+                return
+            try:
+                strategy_id = str(UUID(parts[1]))
+                payload = {"strategy_id": strategy_id}
+                if parts[0] != "pause":
+                    if len(parts) != 4:
                         return
-                    payload["version"] = int(data[2])
-                    payload["approval"] = data[3]
-                async with self.sessions.begin() as session:
+                    payload.update(version=int(parts[2], 16 if parts[0] == "run" else 10), approval=parts[3])
+                elif len(parts) != 2:
+                    return
+            except ValueError:
+                return
+            stale = message.get("edit_date", message.get("date", 0)) < self.started_at
+            notice = "이전 확인 화면입니다. 최신 설정을 다시 확인한 후 요청하세요."
+            async with self.sessions.begin() as session:
+                row = await session.get(Strategy, strategy_id, with_for_update=True)
+                if not row or row.status == "ARCHIVED":
+                    stale = True
+                elif parts[0] != "pause":
+                    stale = (
+                        stale
+                        or payload["version"] != row.version
+                        or payload["approval"] != approval_digest(row, self.settings)
+                        or await self.pending_settings(session, row)
+                    )
+                if not stale:
                     await enqueue(
                         session,
                         f"telegram-{update['update_id']}",
-                        data[0],
+                        "pause" if parts[0] == "pause" else "start",
                         payload,
                         f"telegram:{self.settings.telegram_me}",
                     )
-                await self.call(
-                    "answerCallbackQuery",
-                    {
-                        "callback_query_id": callback["id"],
-                        "text": "요청을 접수했습니다. 처리 결과를 확인하세요.",
-                    },
-                )
+                    notice = "요청을 접수했습니다. 처리 결과는 알림과 새로고침으로 확인하세요."
+            await self.screen(
+                "detail", message_id=message.get("message_id"), strategy_id=strategy_id, notice=notice
+            )
             return
-        text = message.get("text", "").split()
-        command = text[0].split("@")[0] if text else ""
-        if command == "/pause" and message.get("date", 0) < self.started_at:
-            return
-        if command in {"/start", "/help"}:
-            await self.send(
-                "Cotrader\n/status 상태·손익\n/account 토스 실제 계좌\n/crypto 업비트 실제 계좌\n/guide 시작 가이드\n/strategies 전략·승인\n/pause 모든 주문 중단\n/web 통계·백테스트\n\n전략 예산 안에서 자동 실행합니다. 중단 시 보유분은 매도하지 않습니다."
-            )
-        elif command == "/account":
-            from cotrader.account import account_message, account_view
-
-            async with self.sessions() as session:
-                data = account_view(await session.get(RuntimeState, "broker_account"))
-            await self.send(account_message(data))
-            async with self.sessions.begin() as session:
-                await put_runtime(
-                    session, "telegram_account_reply", {"update_id": update["update_id"], "status": "SENT"}
-                )
-        elif command == "/crypto":
-            from cotrader.account import account_view, crypto_account_message
-
-            async with self.sessions() as session:
-                data = account_view(await session.get(RuntimeState, "upbit_account"))
-            await self.send(crypto_account_message(data))
-        elif command == "/guide":
-            await self.send(
-                "실제 종목의 데이터 수집 → 검증 → 모의매매 순서로 따라가세요.",
-                [[{"text": "사용 가이드 열기", "url": self.settings.public_url + "/guide"}]],
-            )
-        elif command == "/web":
-            if self.settings.auth_mode == "github":
-                await self.send(
-                    "GitHub 본인 계정으로 로그인해 통계를 확인하세요.",
-                    [[{"text": "Cotrader 열기", "url": self.settings.public_url}]],
-                )
+        tokens = message.get("text", "").split()
+        command = tokens[0].split("@")[0] if tokens else ""
+        if command == "/pause":
+            if message.get("date", 0) < self.started_at:
                 return
-            if self.settings.auth_mode != "telegram" or not self.settings.public_url.startswith("https://"):
-                await self.send(
-                    "웹 통계는 현재 개발 컴퓨터의 http://127.0.0.1:8000 에서 확인할 수 있습니다. 휴대폰용 화면은 HTTPS 주소와 인증 설정 후 연결됩니다."
-                )
-                return
-            await self.send(
-                "통계와 전략 설정을 엽니다.",
-                [[{"text": "Cotrader 열기", "web_app": {"url": self.settings.public_url}}]],
-            )
-        elif command == "/status":
-            async with self.sessions() as session:
-                status = await session.get(RuntimeState, "engine")
-                rows = [
-                    await session.get(RuntimeState, portfolio_key(venue, mode))
-                    for venue in VENUES
-                    for mode in ("paper", "live")
-                ]
-            lines = ["Cotrader 상태", str(status.data if status else "실행기 연결 대기")]
-            for row in rows:
-                if row:
-                    p = row.data
-                    lines.append(
-                        f"{p['venue']} {p['mode']} · 평가 {p['equity'] or '확인 불가'} {p['currency']} · 비용 {p['costs']} {p['currency']} · 미체결 {p['pending_orders']} · {'중단' if p['halted'] else '대기/운영'}"
-                    )
-            await self.send("\n".join(lines))
-        elif command == "/strategies":
-            async with self.sessions() as session:
-                rows = (
-                    await session.scalars(
-                        select(Strategy)
-                        .where(Strategy.status != "ARCHIVED")
-                        .order_by(Strategy.created_at)
-                        .limit(20)
-                    )
-                ).all()
-            if not rows:
-                await self.send("저장된 전략이 없습니다. /web 에서 종목·예산·가격 범위를 먼저 설정하세요.")
-            for row in rows:
-                c = row.config
-                unit = "개" if is_upbit(row.venue) else "주"
-                cur = currency(row.venue)
-                risk = self.settings.risk_for(row.venue)
-                details = f"{row.name} · {row.symbol} · {row.mode}\n상태 {row.status}\n예산 {c['budget']} {cur} · 전략 {c['kind']}\n"
-                if c["kind"] == "grid":
-                    details += f"범위 {c['lower']}~{c['upper']} {cur} · {c['grids']}단계 · {c['spacing']}\n"
-                    from cotrader.domain import StrategySpec, grid_quantity, levels
-
-                    spec = StrategySpec.model_validate(c)
-                    prices = levels(spec)
-                    details += (
-                        "\n".join(
-                            f"{price} → {prices[i + 1]} {cur} · {grid_quantity(spec, i)}{unit}"
-                            for i, price in enumerate(prices[:-1])
-                        )
-                        + "\n"
-                    )
-                    if spec.inventory_quantity:
-                        details += f"보유 전량 {spec.inventory_quantity}{unit} 편입 · 추가 원화 0 · 매도부터 시작\n각 단계의 매도대금으로만 재매수 반복 · 운용 손익은 평가 기준가 {spec.inventory_reference_price}부터 계산\n"
-                    details += f"하락 시 신규 매수 보류: {'사용' if c['signal_gate'] else '사용 안 함'}\n"
-                details += f"EMA {c['fast']}/{c['slow']} · RSI {c['rsi_period']} · 진입 {c['rsi_entry']}/매도 {c['rsi_exit']}\n수수료 가정 {c['commission_rate']} · 체결 비용 {c['slippage_bps']}bp\n"
-                details += f"{c['timeframe']}분 신호 · 최대 호가 차이 {c['max_spread_bps']}bp\n손실 기준: 하루 {risk['daily_loss']} {cur}, 고점 대비 {risk['drawdown']} {cur}\n전체 세션 · 중단 시 보유 유지\n설정 버전 {row.version}"
-                buttons = [
-                    [
-                        {
-                            "text": "위 설정 승인·시작",
-                            "callback_data": f"start:{row.id}:{row.version}:{approval_digest(row, self.settings)}",
-                        },
-                        {"text": "중단", "callback_data": f"pause:{row.id}"},
-                    ]
-                ]
-                await self.send(details, buttons)
-        elif command == "/pause":
             async with self.sessions.begin() as session:
                 await enqueue(
                     session,
@@ -284,8 +322,22 @@ class TelegramBot:
                     f"telegram:{self.settings.telegram_me}",
                 )
             await self.send(
-                "전체 중단을 접수했습니다. 미체결 주문 취소 결과는 별도로 확인하며 보유 자산은 유지합니다."
+                [
+                    view.heading("전체 중단 요청 접수"),
+                    view.paragraph("미체결 주문 취소 결과를 확인 중입니다. 보유 자산은 유지합니다."),
+                ],
+                [[view.button("주문 상태 확인", "nav:orders:0")]],
             )
+            return
+        name = {"/start": "menu", "/account": "toss", "/crypto": "pocket"}.get(
+            command, command.removeprefix("/")
+        )
+        await self.screen(name)
+        if name == "toss":
+            async with self.sessions.begin() as session:
+                await put_runtime(
+                    session, "telegram_account_reply", {"update_id": update["update_id"], "status": "SENT"}
+                )
 
     async def notifications(self):
         async with self.sessions() as session:
@@ -303,7 +355,18 @@ class TelegramBot:
             ).all()
         for event in events:
             # Delivery is at-least-once; include a stable receipt to recognize retries.
-            await self.send(f"{event.message}\n확인번호 {event.id[:8]}")
+            buttons = [[view.button("운영 상태", "nav:status:0"), view.button("미체결 주문", "nav:orders:0")]]
+            if event.strategy_id:
+                buttons.insert(0, [view.button("해당 전략 보기", f"detail:{event.strategy_id}")])
+            elif event.data.get("discovery_id"):
+                buttons.insert(0, [view.button("발굴 결과 보기", f"research:{event.data['discovery_id']}")])
+            async with self.sessions() as session:
+                intent = (
+                    await session.get(Intent, event.data["intent_id"])
+                    if event.kind == "fill" and event.data.get("intent_id")
+                    else None
+                )
+            await self.send(view.notification(event, intent), buttons)
             async with self.sessions.begin() as session:
                 row = await session.get(Event, event.id)
                 row.sent = True
@@ -315,7 +378,7 @@ class TelegramBot:
                 session.add(
                     Event(
                         kind="health",
-                        message="주문 실행기 응답이 2분 이상 없습니다. 미체결 주문은 증권사 앱에서 확인하세요.",
+                        message="주문 실행기 응답이 2분 이상 없습니다. 미체결 주문은 업비트·토스증권 앱에서 확인하세요.",
                         notify=True,
                     )
                 )

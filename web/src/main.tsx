@@ -1,9 +1,15 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { ResearchLibrary } from "./ResearchLibrary";
 import { Start } from "./Start";
 import { Guide } from "./Guide";
+import { ProfitPanel, ProfitReport } from "./ProfitPanel";
+import {
+  MarketCautionFields,
+  MarketCautionSummary,
+  MarketCautionsForm,
+} from "./MarketCautions";
 import {
   MarketContext,
   isCrypto,
@@ -12,6 +18,14 @@ import {
   useMarket,
   formatMoney,
 } from "./Market";
+
+import {
+  approvalMatches,
+  changedApproval,
+  prepareStartApproval,
+  verifyStartApproval,
+  waitForCommand,
+} from "./approval";
 
 type Data = Record<string, any>;
 type Tab = "start" | "overview" | "strategies" | "research" | "orders";
@@ -224,6 +238,7 @@ function App({
   const [status, setStatus] = useState<Data>({});
   const [account, setAccount] = useState<Data>({});
   const [portfolio, setPortfolio] = useState<Data | null>(null);
+  const [profit, setProfit] = useState<ProfitReport | null>(null);
   const [strategies, setStrategies] = useState<Data[]>([]);
   const [orders, setOrders] = useState<Data[]>([]);
   const [events, setEvents] = useState<Data[]>([]);
@@ -239,6 +254,7 @@ function App({
   const [notice, setNotice] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [inventoryAsset, setInventoryAsset] = useState<Data | null>(null);
+  const [cautionStrategy, setCautionStrategy] = useState<Data | null>(null);
   const [selected, setSelected] = useState<Data | null>(null);
   const [confirm, setConfirm] = useState<Data | null>(null);
   const [result, setResult] = useState<Data | null>(null);
@@ -263,10 +279,12 @@ function App({
     })().catch((e) => setError(e.message));
   }, []);
 
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
     if (!auth) return;
+    const sequence = ++refreshSequence.current;
     const values = await Promise.all([
-      api(`/status?venue=${venue}`),
+      api(`/status?venue=${venue}&mode=${mode}`),
       api(`/portfolio?mode=${mode}&venue=${venue}`),
       api("/strategies"),
       api(`/orders?mode=${mode}&venue=${venue}`),
@@ -278,8 +296,11 @@ function App({
       api(`/account?venue=${venue}`),
       api("/recommendations"),
       api(`/discoveries?venue=${venue}`),
+      api(`/profit?mode=${mode}&base_currency=KRW`),
     ]);
+    if (sequence !== refreshSequence.current) return;
     setDiscoveries(values[11]);
+    setProfit(values[12]);
     setStatus(values[0]);
     setPortfolio(values[1]?.data ?? null);
     setStrategies(values[2].filter((row: Data) => row.venue === venue));
@@ -309,7 +330,10 @@ function App({
   useEffect(() => {
     refresh().catch(showError);
     const timer = setInterval(() => refresh().catch(showError), 5000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      refreshSequence.current++;
+    };
   }, [refresh, showError]);
   const act = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -325,12 +349,46 @@ function App({
   };
   const sendCommand = (action: string, payload: Data) =>
     act(async () => {
-      await api("/commands", { id: crypto.randomUUID(), action, payload });
+      if (action === "start") {
+        try {
+          await verifyStartApproval(api, {
+            id: payload.strategy_id,
+            ...payload,
+          });
+        } catch (error) {
+          setConfirm(null);
+          throw error;
+        }
+      }
+      const command = await api("/commands", {
+        id: crypto.randomUUID(),
+        action,
+        payload,
+      });
       setConfirm(null);
+      if (action === "set_usdt_capital") {
+        setNotice("운용 한도를 반영 중입니다…");
+        try {
+          await waitForCommand(api, command.id);
+        } finally {
+          setNotice("");
+          await refresh();
+        }
+        setNotice(
+          "운용 한도 반영 완료. BTC 설정 확인·시작에서 최신 내용을 확인하세요.",
+        );
+        return;
+      }
       setNotice(
         "요청을 접수했습니다. 아래 처리 기록에서 결과를 확인할 수 있습니다.",
       );
     });
+  const staleConfirmation =
+    confirm?.action === "start" &&
+    !approvalMatches(
+      confirm.strategy,
+      strategies.find((s) => s.id === confirm.strategy.id),
+    );
   const funded = strategies.filter((s) => s.mode === mode && s.state.funded);
   const engineTime = status.engine?.updated_at
     ? new Date(`${status.engine.updated_at}Z`).getTime()
@@ -600,6 +658,7 @@ function App({
           )}
           {tab === "overview" && (
             <>
+              <ProfitPanel report={profit} />
               <AccountPanel
                 account={account}
                 telegram={status.telegram}
@@ -835,12 +894,39 @@ function App({
                         </div>
                       )}
                       <p className="strategy-reason">{s.reason}</p>
-                      <InventoryHandoverAction
-                        strategy={s}
-                        strategies={strategies}
-                        busy={busy}
-                        onConfirm={setConfirm}
-                      />
+                      {isCrypto(s.venue) && (
+                        <>
+                          <MarketCautionSummary
+                            allowed={s.config.allowed_market_cautions}
+                          />
+                          <button
+                            className="outline"
+                            disabled={
+                              busy ||
+                              s.pending_settings ||
+                              !["DRAFT", "PAUSED"].includes(s.status)
+                            }
+                            onClick={() =>
+                              act(async () => {
+                                const current = (await api("/strategies")).find(
+                                  (row: Data) => row.id === s.id,
+                                );
+                                if (!current || current.pending_settings)
+                                  throw new Error(
+                                    "주의 설정을 반영 중입니다. 잠시 후 다시 확인하세요.",
+                                  );
+                                setCautionStrategy(current);
+                              })
+                            }
+                          >
+                            {s.status === "RUNNING"
+                              ? "중단 후 주의 설정 변경 가능"
+                              : s.pending_settings
+                                ? "주의 설정 반영 중…"
+                                : "주의 설정"}
+                          </button>
+                        </>
+                      )}
                       {s.venue === "upbit" &&
                         s.mode === "live" &&
                         s.state.funded &&
@@ -946,37 +1032,38 @@ function App({
                           }
                           disabled={
                             busy ||
+                            s.pending_settings ||
                             (s.status !== "RUNNING" &&
                               s.mode === "live" &&
                               !status.live_enabled)
                           }
                           onClick={() =>
                             act(async () => {
-                              const preview =
+                              const prepared =
                                 s.status === "RUNNING"
-                                  ? { grid: [] }
-                                  : await api("/strategies/preview", {
-                                      name: s.name,
-                                      mode: s.mode,
-                                      spec: s.config,
-                                    });
+                                  ? { strategy: s, grid: [] }
+                                  : await prepareStartApproval(api, s.id);
+                              const current = prepared.strategy;
                               setConfirm({
                                 action:
-                                  s.status === "RUNNING" ? "pause" : "start",
+                                  current.status === "RUNNING"
+                                    ? "pause"
+                                    : "start",
                                 title:
-                                  s.status === "RUNNING"
+                                  current.status === "RUNNING"
                                     ? "전략을 중단할까요?"
                                     : "이 설정으로 실행할까요?",
-                                strategy: s.status === "RUNNING" ? null : s,
-                                grid: preview.grid,
+                                strategy:
+                                  current.status === "RUNNING" ? null : current,
+                                grid: prepared.grid,
                                 detail:
-                                  s.status === "RUNNING"
+                                  current.status === "RUNNING"
                                     ? "대기 주문을 취소하고 보유분은 유지합니다."
-                                    : `${s.mode === "paper" ? "모의매매" : "실거래"} · 전체 세션 · 승인한 예산과 설정으로 자동 주문합니다.`,
+                                    : `${current.mode === "paper" ? "모의매매" : "실거래"} · 전체 세션 · 승인한 예산과 설정으로 자동 주문합니다.`,
                                 payload: {
-                                  strategy_id: s.id,
-                                  version: s.version,
-                                  approval: s.approval,
+                                  strategy_id: current.id,
+                                  version: current.version,
+                                  approval: current.approval,
                                 },
                               });
                             })
@@ -992,6 +1079,36 @@ function App({
                     </section>
                   ))}
               </div>
+              {venue === "upbit_usdt" && mode === "live" && (
+                <section className="panel">
+                  <p>
+                    총운용 한도 {money(status.capital)} · 보유분 편입을 포함한
+                    전략 예산의 상한입니다.
+                  </p>
+                  <button
+                    className="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      act(async () => {
+                        const capital = await api("/upbit-usdt-capital");
+                        setConfirm({
+                          action: "set_usdt_capital",
+                          title: "USDT 운용 한도를 변경할까요?",
+                          detail:
+                            "코트레이더 포켓의 등록 전략을 위한 한도입니다. 메인 포켓 자산은 포함하지 않습니다. 한도 변경만으로 전략을 시작하거나 주문하지 않습니다.",
+                          capital,
+                          payload: {
+                            capital: capital.required,
+                            approval: capital.approval,
+                          },
+                        });
+                      })
+                    }
+                  >
+                    운용 한도 설정
+                  </button>
+                </section>
+              )}
               {!strategies.some(
                 (s) => s.mode === mode && s.status !== "ARCHIVED",
               ) && (
@@ -1166,6 +1283,41 @@ function App({
           </footer>
         </div>
       </main>
+      {cautionStrategy && (
+        <MarketCautionsForm
+          symbol={cautionStrategy.symbol}
+          allowed={cautionStrategy.config.allowed_market_cautions}
+          busy={busy}
+          onClose={() => setCautionStrategy(null)}
+          onSave={(allowed) =>
+            act(async () => {
+              const command = await api("/commands", {
+                id: crypto.randomUUID(),
+                action: "set_market_cautions",
+                payload: {
+                  strategy_id: cautionStrategy.id,
+                  version: cautionStrategy.version,
+                  approval: cautionStrategy.approval,
+                  allowed_market_cautions: allowed,
+                },
+              });
+              setCautionStrategy(null);
+              setNotice("주의 설정을 반영 중입니다…");
+              try {
+                await waitForCommand(api, command.id);
+                setNotice(
+                  "주의 설정 반영이 완료되었습니다. 설정 확인·시작에서 최신 내용을 확인하세요.",
+                );
+              } catch (error) {
+                setNotice("");
+                throw error;
+              } finally {
+                await refresh();
+              }
+            })
+          }
+        />
+      )}
       {inventoryAsset && (
         <InventoryForm
           asset={inventoryAsset}
@@ -1230,6 +1382,48 @@ function App({
           >
             <h2>{confirm.title}</h2>
             <p>{confirm.detail}</p>
+            {confirm.action === "set_usdt_capital" && (
+              <div className="confirm-details">
+                <p>
+                  현재 {confirm.capital.capital} USDT → 등록 전략 전체 필요 한도{" "}
+                  {confirm.capital.required} USDT
+                </p>
+                {confirm.capital.strategies.map((s: Data) => (
+                  <p key={s.id}>
+                    {s.symbol} · 예산 {s.budget} USDT
+                  </p>
+                ))}
+                <label>
+                  변경할 총운용 한도 · USDT
+                  <input
+                    aria-label="변경할 총운용 한도"
+                    type="number"
+                    min={confirm.capital.minimum}
+                    max={confirm.capital.maximum}
+                    step="any"
+                    value={confirm.payload.capital}
+                    onChange={(e) =>
+                      setConfirm({
+                        ...confirm,
+                        payload: {
+                          ...confirm.payload,
+                          capital: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <p>
+                  일일 손실 {confirm.capital.risk.daily_loss} USDT · 고점 대비
+                  하락 {confirm.capital.risk.drawdown} USDT 기준을 유지합니다.
+                  이미 발생한 손익과 위험 중단 상태도 유지합니다.
+                </p>
+                <p>
+                  저장 후 변경된 한도로 전략 설정을 다시 확인해야 시작할 수
+                  있습니다.
+                </p>
+              </div>
+            )}
             {confirm.action === "resolve" && (
               <label>
                 거래소 주문 번호
@@ -1367,6 +1561,11 @@ function App({
                   체결 비용 {confirm.strategy.config.slippage_bps}bp
                 </p>
                 <p>중단 시 미체결 취소 · 보유 유지</p>
+                {isCrypto(confirm.strategy.venue) && (
+                  <MarketCautionSummary
+                    allowed={confirm.strategy.config.allowed_market_cautions}
+                  />
+                )}
                 {confirm.strategy.mode === "live" && (
                   <p className="banner danger">
                     실제 계좌에서 자동으로 매수·매도합니다. 시작 직전 계좌·기존
@@ -1376,6 +1575,9 @@ function App({
                 )}
               </div>
             )}
+            {staleConfirmation && (
+              <p className="banner danger">{changedApproval}</p>
+            )}
             <div className="card-actions">
               <button className="outline" onClick={() => setConfirm(null)}>
                 돌아가기
@@ -1384,7 +1586,16 @@ function App({
                 className="primary"
                 disabled={
                   busy ||
-                  (confirm.action === "resolve" && !confirm.payload.broker_id)
+                  staleConfirmation ||
+                  (confirm.action === "resolve" &&
+                    !confirm.payload.broker_id) ||
+                  (confirm.action === "set_usdt_capital" &&
+                    (!confirm.payload.capital ||
+                      Number(confirm.payload.capital) <= 0 ||
+                      Number(confirm.payload.capital) <
+                        Number(confirm.capital.minimum) ||
+                      Number(confirm.payload.capital) >
+                        Number(confirm.capital.maximum)))
                 }
                 onClick={() => sendCommand(confirm.action, confirm.payload)}
               >
@@ -1846,6 +2057,7 @@ function InventoryForm({
   const [basis, setBasis] = useState(maker ? "near_market" : "average");
   const [grids, setGrids] = useState(5);
   const [step, setStep] = useState(maker ? "0.75" : "2");
+  const [allowedCautions, setAllowedCautions] = useState<string[]>([]);
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
@@ -1870,6 +2082,7 @@ function InventoryForm({
             first_sell_basis: basis,
             grids,
             step_percent: step,
+            allowed_market_cautions: allowedCautions,
           });
         }}
       >
@@ -1958,6 +2171,11 @@ function InventoryForm({
             : "시작 후에는 가격이 도달할 때 한 주문씩 처리합니다."}{" "}
           계좌 수량이 달라지거나 손실 한도에 도달하면 중단합니다.
         </p>
+        <MarketCautionFields
+          allowed={allowedCautions}
+          onChange={setAllowedCautions}
+          disabled={busy}
+        />
         <div className="card-actions">
           <button type="button" className="outline" onClick={onClose}>
             돌아가기
@@ -2006,6 +2224,7 @@ function StrategyForm({
     quote_max_age: 10,
     commission_rate: venue === "upbit_usdt" ? "0.0025" : "0.001",
     slippage_bps: "10",
+    allowed_market_cautions: [],
     ...initial,
   });
   const change = (key: string, value: unknown) =>
@@ -2147,6 +2366,13 @@ function StrategyForm({
               보유분은 유지합니다.
             </p>
           </>
+        )}
+        {isCrypto(venue) && (
+          <MarketCautionFields
+            allowed={form.allowed_market_cautions}
+            onChange={(value) => change("allowed_market_cautions", value)}
+            disabled={busy}
+          />
         )}
         <details>
           <summary>신호와 체결 설정</summary>

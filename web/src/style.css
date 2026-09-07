@@ -878,6 +878,47 @@ input::placeholder {
   height: 14px;
   accent-color: #527244;
 }
+
+.market-cautions {
+  border: 0;
+  padding: 0;
+  margin: 24px 0;
+  min-width: 0;
+}
+.market-cautions legend {
+  font-weight: 600;
+  padding: 0;
+}
+.caution-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+}
+.caution-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.switch-track {
+  display: inline-flex;
+  width: 34px;
+  padding: 3px;
+  border-radius: 20px;
+  background: #687078;
+}
+.switch-track i {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+}
+.caution-switch[aria-checked="true"] .switch-track {
+  background: #a36514;
+  justify-content: flex-end;
+}
 details {
   border-top: 1px solid #e3e9da;
   padding-top: 18px;
@@ -1820,4 +1861,45 @@ input[type="checkbox"] {
     width: 100%;
     justify-content: center;
   }
+}
+.profit-panel .metrics {
+  margin: 20px 0;
+}
+.profit-panel .metric strong {
+  font-size: 26px;
+  overflow-wrap: anywhere;
+}
+.profit-panel [data-trend="up"] {
+  color: #b53637;
+}
+.profit-panel [data-trend="down"] {
+  color: #3267a4;
+}
+.profit-panel details {
+  border-top: 1px solid var(--line, #e1e6eb);
+  padding: 14px 0;
+}
+.profit-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.profit-panel details p,
+.profit-panel > p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.profit-panel .profit-notice {
+  color: #9b4b00;
+}
+.profit-breakdown {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+.profit-breakdown dt {
+  font-size: 13px;
+}
+.profit-breakdown dd {
+  margin: 5px 0 0;
+  font-weight: 600;
 }

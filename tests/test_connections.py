@@ -7,13 +7,14 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from cotrader.account import account_message, account_view
+from cotrader.account import account_view
 from cotrader.api import create_app
 from cotrader.broker import BrokerError, TossBroker
 from cotrader.config import Settings
 from cotrader.engine import Engine
 from cotrader.models import Command, RuntimeState
 from cotrader.telegram import TelegramBot
+from cotrader.telegram_views import toss
 
 
 def fixture_settings():
@@ -86,7 +87,7 @@ async def test_account_read_failure_preserves_previous_snapshot_without_claiming
         row = await session.get(RuntimeState, "broker_account")
         view = account_view(row)
         assert view["status"] == "ERROR" and view["snapshot"] == good and view["read_only"]
-        assert "마지막 조회 값" in account_message(view)
+        assert "마지막 조회 값" in str(toss(view))
         assert await session.scalar(select(func.count()).select_from(Command)) == 0
     await engine.broker.close()
 
@@ -115,7 +116,7 @@ async def test_telegram_account_is_private_and_does_not_create_trade_commands(db
             "message": {"from": {"id": 7}, "chat": {"id": 7, "type": "private"}, "text": "/account"},
         }
     )
-    assert "아직 확인된 계좌" in bot.send.call_args.args[0]
+    assert "아직 확인된 계좌" in str(bot.send.call_args.args[0])
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(Command)) == 0
     bot.send.reset_mock()
@@ -130,8 +131,8 @@ async def test_telegram_account_is_private_and_does_not_create_trade_commands(db
             },
         }
     )
-    assert "HTTPS" in bot.send.call_args.args[0]
-    assert len(bot.send.call_args.args) == 1
+    assert "HTTPS" in str(bot.send.call_args.args[0])
+    assert bot.send.call_args.args[1]
     await bot.client.aclose()
 
 

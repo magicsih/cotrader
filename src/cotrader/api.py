@@ -16,7 +16,18 @@ from cotrader.config import Settings
 from cotrader.db import database
 from cotrader.domain import Bar, StrategySpec, grid_quantity, levels
 from cotrader.markets import Venue, currency, is_upbit, portfolio_key, validate_symbol
-from cotrader.models import BacktestJob, CandleRow, Command, Event, Intent, RuntimeState, Snapshot, Strategy
+from cotrader.models import (
+    AccountState,
+    BacktestJob,
+    CandleRow,
+    Command,
+    Event,
+    Intent,
+    RuntimeState,
+    Snapshot,
+    Strategy,
+)
+from cotrader.profit import ReportCurrency, profit_summary
 from cotrader.research import OptimizationOptions
 from cotrader.services import approval_digest, create_strategy, enqueue
 
@@ -161,16 +172,17 @@ def create_app(settings: Settings | None = None, sessions_override=None):
         return {"ok": True}
 
     @app.get("/api/status")
-    async def status(_actor: Actor, venue: Venue = "toss"):
+    async def status(_actor: Actor, venue: Venue = "toss", mode: Literal["paper", "live"] = "paper"):
         async with sessions() as session:
             runtime = await session.get(RuntimeState, "engine:upbit" if is_upbit(venue) else "engine")
             telegram = await session.get(RuntimeState, "telegram")
+            account = await session.get(AccountState, {"venue": venue, "mode": mode})
             return {
                 "engine": serialize(runtime) if runtime else None,
                 "live_enabled": settings.live_for(venue),
                 "venue": venue,
                 "currency": currency(venue),
-                "capital": str(settings.capital_for(venue)),
+                "capital": str(account.capital if account else settings.capital_for(venue)),
                 "daily_loss": settings.risk_for(venue)["daily_loss"],
                 "drawdown": settings.risk_for(venue)["drawdown"],
                 "market_source": ("upbit" if settings.upbit_enabled else "offline")
@@ -198,15 +210,49 @@ def create_app(settings: Settings | None = None, sessions_override=None):
             row = await session.get(RuntimeState, portfolio_key(venue, mode))
             return serialize(row) if row else None
 
+    @app.get("/api/profit")
+    async def profit(
+        _actor: Actor, mode: Literal["paper", "live"] = "live", base_currency: ReportCurrency = "KRW"
+    ):
+        async with sessions() as session:
+            return await profit_summary(session, mode, base_currency)
+
     @app.get("/api/strategies")
     async def strategies(_actor: Actor):
         async with sessions() as session:
+            pending = {
+                strategy_id
+                for payload in await session.scalars(
+                    select(Command.payload).where(
+                        Command.action == "set_market_cautions",
+                        Command.status.in_(["QUEUED", "RUNNING"]),
+                    )
+                )
+                if isinstance(strategy_id := payload.get("strategy_id"), str)
+            }
+            capital_pending = await session.scalar(
+                select(Command.id).where(
+                    Command.action == "set_usdt_capital", Command.status.in_(["QUEUED", "RUNNING"])
+                )
+            )
             return [
-                {**serialize(row), "approval": approval_digest(row, settings)}
+                {
+                    **serialize(row),
+                    "approval": approval_digest(row, settings),
+                    "pending_settings": row.id in pending
+                    or bool(capital_pending and row.venue == "upbit_usdt" and row.mode == "live"),
+                }
                 for row in (
                     await session.scalars(select(Strategy).order_by(Strategy.created_at.desc()))
                 ).all()
             ]
+
+    @app.get("/api/upbit-usdt-capital")
+    async def upbit_usdt_capital(_actor: Actor):
+        from cotrader.capital import capital_view
+
+        async with sessions() as session:
+            return await capital_view(session, settings)
 
     @app.post("/api/strategies/preview")
     async def preview(body: StrategyInput, _actor: Actor):
@@ -259,6 +305,14 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                     await session.scalars(select(Command).order_by(Command.created_at.desc()).limit(30))
                 ).all()
             ]
+
+    @app.get("/api/commands/{command_id}")
+    async def command_status(command_id: str, _actor: Actor):
+        async with sessions() as session:
+            row = await session.get(Command, command_id)
+            if not row:
+                raise HTTPException(404, "요청 기록이 없습니다")
+            return serialize(row)
 
     @app.get("/api/orders")
     async def orders(_actor: Actor, mode: Literal["paper", "live"] = "paper", venue: Venue = "toss"):

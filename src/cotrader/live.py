@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from cotrader.domain import D, StrategySpec, levels
-from cotrader.markets import currency, price_tick, round_quantity, tick_size, upbit_venue
+from cotrader.markets import UpbitCaution, currency, price_tick, round_quantity, tick_size, upbit_venue
 
 
 class InventoryGridRequest(BaseModel):
@@ -14,6 +14,7 @@ class InventoryGridRequest(BaseModel):
     allocation: Literal["all"]
     first_sell_basis: Literal["average", "market", "near_market"]
     execution_policy: Literal["trigger_limit", "maker_only"] = "trigger_limit"
+    allowed_market_cautions: tuple[UpbitCaution, ...] = ()
     source_strategy_id: str | None = Field(default=None, max_length=36)
     source_version: int | None = None
     source_approval: str | None = Field(default=None, max_length=16)
@@ -22,6 +23,15 @@ class InventoryGridRequest(BaseModel):
     target_approval: str | None = Field(default=None, max_length=16)
     grids: int = Field(default=5, ge=2, le=30)
     step_percent: D = Field(default=D("2"), ge=D("0.5"), le=D("10"))
+
+
+class MarketCautionsRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    strategy_id: str = Field(min_length=1, max_length=36)
+    version: int = Field(ge=1)
+    approval: str = Field(pattern=r"^[a-f0-9]{16}$")
+    allowed_market_cautions: tuple[UpbitCaution, ...]
 
 
 def inventory_grid_spec(request, chance, quote):
@@ -63,6 +73,7 @@ def inventory_grid_spec(request, chance, quote):
         inventory_average_price=average,
         inventory_average_currency=average_currency,
         execution_policy=request.execution_policy,
+        allowed_market_cautions=request.allowed_market_cautions,
         lower=lower,
         upper=price_tick(lower * ratio**request.grids, venue, ROUND_CEILING),
         grids=request.grids,
@@ -95,6 +106,43 @@ def amount(value):
     if not number.is_finite() or number < 0:
         raise ValueError("계좌 응답의 금액·수량을 확인할 수 없습니다")
     return number
+
+
+def pending_order_matches(intent, order):
+    """Read-only evidence check; never reconcile or invent missing execution data."""
+    try:
+        execution = order["execution"]
+        return (
+            bool(intent.broker_id)
+            and intent.costs_final
+            and intent.status in {"PENDING", "PARTIAL_FILLED"}
+            and (
+                order["orderId"],
+                order["clientOrderId"],
+                order["symbol"],
+                order["side"],
+                amount(order["quantity"]),
+                amount(order["price"]),
+                order["status"],
+                amount(execution["filledQuantity"]),
+                amount(execution["filledAmount"]),
+                amount(execution["commission"]) + amount(execution["tax"]),
+            )
+            == (
+                intent.broker_id,
+                intent.id,
+                intent.symbol,
+                intent.side,
+                intent.quantity,
+                intent.price,
+                intent.status,
+                intent.filled_quantity,
+                intent.filled_amount,
+                intent.costs,
+            )
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
 
 
 def upbit_policy(chance, symbol, commission_rate, *, side=None, total=None, maker_only=False):
