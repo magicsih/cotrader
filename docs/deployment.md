@@ -63,19 +63,19 @@ DB 백업은 `mysqldump --single-transaction` 기반으로 cotrader 스키마를
 
 `main` 푸시가 CI를 통과하고 이미지가 게시되면 `deploy` job이 `vzyx-cluster` Environment의 승인을 기다린다. 운영자가 Approve해야 롤아웃이 시작된다. 승인은 배포 승인이며 실거래 시작 승인이 아니다.
 
-이 job은 `cotrader-api`, `cotrader-research`, `cotrader-engine` 세 Deployment의 이미지를 CI가 게시한 digest로 교체하고 각각 `rollout status`를 확인한다. 순서는 api, research, engine이며 앞 단계가 준비되지 않으면 주문 실행기를 재시작하지 않는다.
+이 job은 GitHub Environment의 `COTRADER_DAILY_LOSS_USDT`, `COTRADER_DRAWDOWN_USDT`, `COTRADER_UPBIT_USDT_AUTO_RECOVER`를 검증해 `cotrader-config`의 해당 세 값만 갱신한다. 이어서 `cotrader-api`, `cotrader-research`, `cotrader-engine` 세 Deployment의 이미지를 CI가 게시한 digest로 교체하고 각각 `rollout status`를 확인한다. 순서는 api, research, engine이며 앞 단계가 준비되지 않으면 주문 실행기를 재시작하지 않는다. Environment 변수가 없거나 양수가 아니거나 하루 기준이 고점 기준보다 크면 배포 전에 실패한다.
 
-ConfigMap, Ingress, NetworkPolicy, 실거래 플래그, Alembic 마이그레이션은 자동화하지 않는다. 운영 오버레이는 저장소 밖에 남기고 기존 승인된 수동 절차로만 변경한다.
+그 밖의 ConfigMap 값, Ingress, NetworkPolicy, 실거래 허용 플래그, Alembic 마이그레이션은 자동화하지 않는다. 운영 오버레이는 저장소 밖에 남기고 기존 승인된 수동 절차로만 변경한다.
 
 ### 승인 전 확인
 
 - `/pause`로 봇 주문이 모두 종료 상태인지 확인한다. engine 재시작은 롤아웃 중에 일어난다.
 - 스키마 변경이 포함된 커밋은 승인하지 않는다. 위 실행 순서 4번의 수동 마이그레이션을 먼저 끝낸 다음 승인한다.
-- 운영 설정 변경이 필요한 커밋은 오버레이를 먼저 적용한 다음 승인한다.
+- 위 세 USDT 운영값 외의 설정 변경이 필요한 커밋은 오버레이를 먼저 적용한 다음 승인한다.
 
 ### 배포 자격
 
-`deploy/k8s/ci-deployer.yaml`의 `github-deployer` ServiceAccount는 cotrader 네임스페이스에서 Deployment의 `get`, `list`, `watch`, `patch`와 Pod 조회만 가진다. Secret 읽기 권한은 없고 다른 네임스페이스에도 접근하지 않는다. 저장소가 공개이므로 워크플로는 클러스터 주소와 해석된 IP를 `add-mask`로 가려 로그에 남기지 않는다.
+`deploy/k8s/ci-deployer.yaml`의 `github-deployer` ServiceAccount는 cotrader 네임스페이스에서 Deployment의 `get`, `list`, `watch`, `patch`, Pod 조회, 이름이 `cotrader-config`인 ConfigMap의 `get`, `patch`만 가진다. Secret 읽기 권한은 없고 다른 ConfigMap이나 네임스페이스에도 접근하지 않는다. 저장소가 공개이므로 워크플로는 클러스터 주소와 해석된 IP를 `add-mask`로 가려 로그에 남기지 않는다.
 
 ### 최초 준비
 

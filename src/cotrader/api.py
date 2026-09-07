@@ -185,6 +185,9 @@ def create_app(settings: Settings | None = None, sessions_override=None):
                 "capital": str(account.capital if account else settings.capital_for(venue)),
                 "daily_loss": settings.risk_for(venue)["daily_loss"],
                 "drawdown": settings.risk_for(venue)["drawdown"],
+                "auto_recover": settings.auto_recover_for(venue),
+                "risk_recovery_ratio": str(settings.risk_recovery_ratio),
+                "risk_recovery_seconds": settings.risk_recovery_seconds,
                 "market_source": ("upbit" if settings.upbit_enabled else "offline")
                 if is_upbit(venue)
                 else settings.market_source,

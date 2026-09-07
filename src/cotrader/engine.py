@@ -51,10 +51,13 @@ from cotrader.models import (
     now,
 )
 from cotrader.services import (
+    RISK_HALT_REASONS,
+    RISK_RECOVERY_REASON,
     approval_digest,
     bootstrap,
     check_risk,
     create_strategy,
+    portfolio_recovered,
     process_command,
     put_runtime,
     record_execution,
@@ -757,6 +760,7 @@ class Engine:
             for venue in UPBIT_VENUES:
                 await check_risk(session, self.settings, self.quotes, at.date().isoformat(), venue=venue)
         if not execution_error:
+            await self.auto_recover_upbit_usdt(at)
             await self.evaluate(at, toss_open=bool(market))
         await self.cancel_stopped()
         if not execution_error:
@@ -800,6 +804,137 @@ class Engine:
                         if portfolio:
                             session.add(Snapshot(mode=mode, venue=venue, data=portfolio.data))
                 self.last_snapshot = at
+
+    async def auto_recover_upbit_usdt(self, at):
+        """Resume only a recovered risk halt; never move loss anchors or submit an order here."""
+        if not (
+            self.settings.upbit_usdt_auto_recover
+            and self.settings.upbit_enabled
+            and self.settings.upbit_usdt_live_enabled
+        ):
+            return False
+        venue, mode = "upbit_usdt", "live"
+        risk = self.settings.risk_for(venue)
+        cutoff = now() - timedelta(seconds=self.settings.risk_recovery_seconds)
+        oldest = cutoff - timedelta(seconds=max(120, self.settings.risk_recovery_seconds * 2))
+        async with self.sessions() as session:
+            account = await session.get(AccountState, {"venue": venue, "mode": mode})
+            portfolio = await session.get(RuntimeState, portfolio_key(venue, mode))
+            candidates = (
+                await session.scalars(
+                    select(Strategy).where(
+                        Strategy.venue == venue,
+                        Strategy.mode == mode,
+                        Strategy.status == "PAUSED",
+                    )
+                )
+            ).all()
+            candidates = [
+                row for row in candidates if row.state.get("funded") and row.reason in RISK_HALT_REASONS
+            ]
+            stable = await session.scalar(
+                select(Snapshot)
+                .where(
+                    Snapshot.venue == venue,
+                    Snapshot.mode == mode,
+                    Snapshot.created_at <= cutoff,
+                    Snapshot.created_at >= oldest,
+                )
+                .order_by(Snapshot.created_at.desc())
+                .limit(1)
+            )
+            if not (
+                account
+                and account.halted
+                and account.reason in RISK_HALT_REASONS
+                and candidates
+                and portfolio
+                and now() - portfolio.updated_at <= timedelta(seconds=30)
+                and stable
+                and portfolio_recovered(portfolio.data, risk, self.settings.risk_recovery_ratio)
+                and portfolio_recovered(stable.data, risk, self.settings.risk_recovery_ratio)
+            ):
+                return False
+            if await session.scalar(
+                select(Intent.id).where(
+                    Intent.venue == venue,
+                    Intent.mode == mode,
+                    Intent.status.in_(ACTIVE_ORDERS),
+                )
+            ):
+                return False
+            candidate_ids = [row.id for row in candidates]
+            try:
+                for row in candidates:
+                    await self.check_live_start(row, session)
+            except (BrokerError, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                async with self.sessions.begin() as update:
+                    await put_runtime(
+                        update,
+                        "risk-recovery:upbit_usdt:live",
+                        {"status": "BLOCKED", "reason": str(exc)[:300]},
+                    )
+                return False
+        async with self.sessions.begin() as session:
+            account = await session.get(AccountState, {"venue": venue, "mode": mode}, with_for_update=True)
+            portfolio = await session.get(RuntimeState, portfolio_key(venue, mode), with_for_update=True)
+            rows = [
+                await session.get(Strategy, strategy_id, with_for_update=True)
+                for strategy_id in candidate_ids
+            ]
+            if not (
+                account
+                and account.halted
+                and account.reason in RISK_HALT_REASONS
+                and portfolio
+                and now() - portfolio.updated_at <= timedelta(seconds=30)
+                and portfolio_recovered(portfolio.data, risk, self.settings.risk_recovery_ratio)
+                and all(
+                    row
+                    and row.status == "PAUSED"
+                    and row.state.get("funded")
+                    and row.reason in RISK_HALT_REASONS
+                    for row in rows
+                )
+                and not await session.scalar(
+                    select(Intent.id).where(
+                        Intent.venue == venue,
+                        Intent.mode == mode,
+                        Intent.status.in_(ACTIVE_ORDERS),
+                    )
+                )
+            ):
+                return False
+            for row in rows:
+                row.state = {**row.state, "last_mid": None, "last_bar": None}
+                row.status, row.reason = "RUNNING", RISK_RECOVERY_REASON
+            account.halted, account.reason = False, RISK_RECOVERY_REASON
+            portfolio.data = {
+                **portfolio.data,
+                "halted": False,
+                "reason": RISK_RECOVERY_REASON,
+                "auto_recovered_at": at.isoformat(),
+            }
+            session.add(
+                Event(
+                    kind="risk",
+                    message=f"live: {RISK_RECOVERY_REASON}",
+                    data={
+                        "venue": venue,
+                        "strategies": candidate_ids,
+                        "anchors_reset": False,
+                        "daily_loss_limit": risk["daily_loss"],
+                        "drawdown_limit": risk["drawdown"],
+                    },
+                    notify=True,
+                )
+            )
+            await put_runtime(
+                session,
+                "risk-recovery:upbit_usdt:live",
+                {"status": "RECOVERED", "strategies": candidate_ids, "at": at.isoformat()},
+            )
+        return True
 
     async def refresh_account(self, at):
         self.last_account_refresh = at
