@@ -3,6 +3,20 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Literal
 
 Venue = Literal["toss", "upbit", "upbit_usdt"]
+UpbitCaution = Literal[
+    "PRICE_FLUCTUATIONS",
+    "TRADING_VOLUME_SOARING",
+    "DEPOSIT_AMOUNT_SOARING",
+    "GLOBAL_PRICE_DIFFERENCES",
+    "CONCENTRATION_OF_SMALL_ACCOUNTS",
+]
+UPBIT_CAUTION_LABELS = {
+    "PRICE_FLUCTUATIONS": "가격 급등락",
+    "TRADING_VOLUME_SOARING": "거래량 급등",
+    "DEPOSIT_AMOUNT_SOARING": "입금량 급등",
+    "GLOBAL_PRICE_DIFFERENCES": "글로벌 가격 차이",
+    "CONCENTRATION_OF_SMALL_ACCOUNTS": "소수 계정 거래 집중",
+}
 UPBIT_VENUES = ("upbit", "upbit_usdt")
 VENUES = ("toss", *UPBIT_VENUES)
 

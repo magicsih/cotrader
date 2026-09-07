@@ -5,6 +5,11 @@ import { ResearchLibrary } from "./ResearchLibrary";
 import { Start } from "./Start";
 import { Guide } from "./Guide";
 import {
+  MarketCautionFields,
+  MarketCautionSummary,
+  MarketCautionsForm,
+} from "./MarketCautions";
+import {
   MarketContext,
   isCrypto,
   Venue,
@@ -239,6 +244,7 @@ function App({
   const [notice, setNotice] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [inventoryAsset, setInventoryAsset] = useState<Data | null>(null);
+  const [cautionStrategy, setCautionStrategy] = useState<Data | null>(null);
   const [selected, setSelected] = useState<Data | null>(null);
   const [confirm, setConfirm] = useState<Data | null>(null);
   const [result, setResult] = useState<Data | null>(null);
@@ -835,6 +841,24 @@ function App({
                         </div>
                       )}
                       <p className="strategy-reason">{s.reason}</p>
+                      {isCrypto(s.venue) && (
+                        <>
+                          <MarketCautionSummary
+                            allowed={s.config.allowed_market_cautions}
+                          />
+                          <button
+                            className="outline"
+                            disabled={
+                              busy || !["DRAFT", "PAUSED"].includes(s.status)
+                            }
+                            onClick={() => setCautionStrategy(s)}
+                          >
+                            {s.status === "RUNNING"
+                              ? "중단 후 주의 설정 변경 가능"
+                              : "주의 설정"}
+                          </button>
+                        </>
+                      )}
                       {s.venue === "upbit" &&
                         s.mode === "live" &&
                         s.state.funded &&
@@ -1160,6 +1184,32 @@ function App({
           </footer>
         </div>
       </main>
+      {cautionStrategy && (
+        <MarketCautionsForm
+          symbol={cautionStrategy.symbol}
+          allowed={cautionStrategy.config.allowed_market_cautions}
+          busy={busy}
+          onClose={() => setCautionStrategy(null)}
+          onSave={(allowed) =>
+            act(async () => {
+              await api("/commands", {
+                id: crypto.randomUUID(),
+                action: "set_market_cautions",
+                payload: {
+                  strategy_id: cautionStrategy.id,
+                  version: cautionStrategy.version,
+                  approval: cautionStrategy.approval,
+                  allowed_market_cautions: allowed,
+                },
+              });
+              setCautionStrategy(null);
+              setNotice(
+                "주의 설정 변경을 요청했습니다. 처리 기록에서 완료를 확인한 뒤 설정 확인·시작을 눌러주세요.",
+              );
+            })
+          }
+        />
+      )}
       {inventoryAsset && (
         <InventoryForm
           asset={inventoryAsset}
@@ -1361,6 +1411,11 @@ function App({
                   체결 비용 {confirm.strategy.config.slippage_bps}bp
                 </p>
                 <p>중단 시 미체결 취소 · 보유 유지</p>
+                {isCrypto(confirm.strategy.venue) && (
+                  <MarketCautionSummary
+                    allowed={confirm.strategy.config.allowed_market_cautions}
+                  />
+                )}
                 {confirm.strategy.mode === "live" && (
                   <p className="banner danger">
                     실제 계좌에서 자동으로 매수·매도합니다. 시작 직전 계좌·기존
@@ -1780,6 +1835,7 @@ function InventoryForm({
   const [basis, setBasis] = useState(maker ? "near_market" : "average");
   const [grids, setGrids] = useState(5);
   const [step, setStep] = useState(maker ? "0.75" : "2");
+  const [allowedCautions, setAllowedCautions] = useState<string[]>([]);
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
@@ -1804,6 +1860,7 @@ function InventoryForm({
             first_sell_basis: basis,
             grids,
             step_percent: step,
+            allowed_market_cautions: allowedCautions,
           });
         }}
       >
@@ -1892,6 +1949,11 @@ function InventoryForm({
             : "시작 후에는 가격이 도달할 때 한 주문씩 처리합니다."}{" "}
           계좌 수량이 달라지거나 손실 한도에 도달하면 중단합니다.
         </p>
+        <MarketCautionFields
+          allowed={allowedCautions}
+          onChange={setAllowedCautions}
+          disabled={busy}
+        />
         <div className="card-actions">
           <button type="button" className="outline" onClick={onClose}>
             돌아가기
@@ -1940,6 +2002,7 @@ function StrategyForm({
     quote_max_age: 10,
     commission_rate: venue === "upbit_usdt" ? "0.0025" : "0.001",
     slippage_bps: "10",
+    allowed_market_cautions: [],
     ...initial,
   });
   const change = (key: string, value: unknown) =>
@@ -2081,6 +2144,13 @@ function StrategyForm({
               보유분은 유지합니다.
             </p>
           </>
+        )}
+        {isCrypto(venue) && (
+          <MarketCautionFields
+            allowed={form.allowed_market_cautions}
+            onChange={(value) => change("allowed_market_cautions", value)}
+            disabled={busy}
+          />
         )}
         <details>
           <summary>신호와 체결 설정</summary>
