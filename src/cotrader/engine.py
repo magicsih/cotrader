@@ -21,7 +21,17 @@ from cotrader.domain import (
     slot_quantity,
 )
 from cotrader.live import InventoryGridRequest, amount, inventory_grid_spec, upbit_policy
-from cotrader.markets import VENUES, currency, order_size_valid, portfolio_key, round_quantity
+from cotrader.markets import (
+    UPBIT_VENUES,
+    VENUES,
+    asset_key,
+    currency,
+    is_upbit,
+    order_size_valid,
+    portfolio_key,
+    round_quantity,
+    upbit_venue,
+)
 from cotrader.models import (
     AccountState,
     CandleRow,
@@ -34,12 +44,14 @@ from cotrader.models import (
     now,
 )
 from cotrader.services import (
+    approval_digest,
     bootstrap,
     check_risk,
     create_strategy,
     process_command,
     put_runtime,
     record_execution,
+    settlement_value,
 )
 from cotrader.upbit import UpbitBroker, market_eligible
 
@@ -86,20 +98,27 @@ class Engine:
         self.lock = None
         self.last_account_refresh = self.last_market_refresh
 
-    async def check_live_start(self, strategy):
+    async def check_live_start(self, strategy, session=None):
         """Fresh account readback; Upbit's test endpoint cannot create an order."""
         spec = StrategySpec.model_validate(strategy.config)
-        async with self.sessions() as session:
-            pending = await session.scalar(
-                select(Intent.id).where(
-                    Intent.venue == strategy.venue, Intent.mode == "live", Intent.status.in_(ACTIVE_ORDERS)
+        if session is None:
+            async with self.sessions() as read_session:
+                return await self.check_live_start(strategy, read_session)
+        pending = await session.scalar(
+            select(Intent.id).where(
+                Intent.venue.in_(UPBIT_VENUES if is_upbit(strategy.venue) else [strategy.venue]),
+                Intent.mode == "live",
+                Intent.status.in_(ACTIVE_ORDERS),
+            )
+        )
+        intents = (
+            await session.scalars(
+                select(Intent).where(
+                    Intent.venue.in_(UPBIT_VENUES if is_upbit(strategy.venue) else [strategy.venue]),
+                    Intent.mode == "live",
                 )
             )
-            intents = (
-                await session.scalars(
-                    select(Intent).where(Intent.venue == strategy.venue, Intent.mode == "live")
-                )
-            ).all()
+        ).all()
         if pending:
             raise ValueError("기존 실거래 미체결·미확인 주문의 대조가 끝난 후 시작하세요")
         owned = {r.broker_id for r in intents if r.broker_id}
@@ -124,9 +143,15 @@ class Engine:
             if not market_eligible(markets.get(spec.symbol)):
                 raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
             chance = await self.upbit.chance(spec.symbol)
-            cash, sellable, quantity = upbit_policy(chance, spec.symbol, spec.commission_rate)
-            orders = await self.upbit.orders(spec.symbol)
-        if any(o["symbol"] == spec.symbol and o["orderId"] not in owned for o in orders):
+            cash, sellable, quantity = upbit_policy(
+                chance, spec.symbol, spec.commission_rate, maker_only=spec.execution_policy == "maker_only"
+            )
+            orders = await self.upbit.orders()
+        if any(
+            asset_key(strategy.venue, o["symbol"]) == asset_key(strategy.venue, spec.symbol)
+            and o["orderId"] not in owned
+            for o in orders
+        ):
             raise ValueError("같은 종목의 수동 주문이 있습니다. 직접 정리한 후 다시 점검하세요")
         importing = bool(spec.inventory_quantity and not strategy.state.get("funded"))
         expected = spec.inventory_quantity if importing else D(strategy.state["quantity"])
@@ -138,7 +163,7 @@ class Engine:
             )
         if cash < D(strategy.state["cash"]):
             raise ValueError("계좌의 사용 가능한 현금이 전략의 남은 현금 예산보다 적습니다")
-        if strategy.venue == "upbit":
+        if is_upbit(strategy.venue):
             quotes = await self.upbit.orderbooks([spec.symbol])
             if not quotes or not quotes[0].valid(spec, datetime.now(UTC)):
                 raise ValueError("신선한 업비트 호가·허용 호가 차이 확인 필요")
@@ -159,30 +184,32 @@ class Engine:
                     held = D(lot["quantity"])
                     buy_size = min(
                         grid_quantity(spec, i) - held,
-                        round_quantity(D(lot["cash"]) / (prices[i] * (1 + spec.commission_rate)), "upbit"),
+                        round_quantity(D(lot["cash"]) / (prices[i] * (1 + spec.commission_rate)), spec.venue),
                     )
                     for side, size, price in (("SELL", held, prices[i + 1]), ("BUY", buy_size, prices[i])):
-                        if order_size_valid(size, price, "upbit"):
+                        if order_size_valid(size, price, spec.venue):
                             upbit_policy(
                                 chance,
                                 spec.symbol,
                                 spec.commission_rate,
                                 side="ask" if side == "SELL" else "bid",
                                 total=price * size,
+                                maker_only=spec.execution_policy == "maker_only",
                             )
                             await self.upbit.test_order(
                                 Intent(
                                     id=uid(),
-                                    venue="upbit",
+                                    venue=spec.venue,
                                     symbol=spec.symbol,
                                     side=side,
                                     price=price,
                                     quantity=size,
-                                )
+                                ),
+                                maker_only=spec.execution_policy == "maker_only",
                             )
                 return
             price = levels(spec)[0] if spec.kind == "grid" and not quantity else quotes[0].ask
-            size = round_quantity(quantity, "upbit") if quantity else slot_quantity(spec, price)
+            size = round_quantity(quantity, spec.venue) if quantity else slot_quantity(spec, price)
             side = "SELL" if quantity else "BUY"
             upbit_policy(
                 chance,
@@ -190,28 +217,51 @@ class Engine:
                 spec.commission_rate,
                 side="ask" if quantity else "bid",
                 total=price * size,
+                maker_only=spec.execution_policy == "maker_only",
             )
             from cotrader.models import uid
 
             await self.upbit.test_order(
-                Intent(id=uid(), venue="upbit", symbol=spec.symbol, side=side, price=price, quantity=size)
+                Intent(id=uid(), venue=spec.venue, symbol=spec.symbol, side=side, price=price, quantity=size)
             )
 
     async def prepare_inventory(self, session, payload):
         request = InventoryGridRequest.model_validate(payload)
+        venue = upbit_venue(request.symbol)
         if not self.settings.upbit_enabled:
             raise ValueError("업비트 연결이 필요합니다")
         existing = (
             await session.scalars(
-                select(Strategy).where(
-                    Strategy.venue == "upbit",
-                    Strategy.mode == "live",
-                    Strategy.symbol == request.symbol,
-                )
+                select(Strategy).where(Strategy.venue.in_(UPBIT_VENUES), Strategy.mode == "live")
             )
         ).all()
-        if any(row.state.get("funded") for row in existing):
+        funded = [
+            row
+            for row in existing
+            if row.state.get("funded")
+            and asset_key(row.venue, row.symbol) == asset_key(venue, request.symbol)
+        ]
+        source = None
+        if request.source_strategy_id:
+            source = next((row for row in funded if row.id == request.source_strategy_id), None)
+            if not source or source.venue == venue or source.status == "ARCHIVED":
+                raise ValueError("이관할 기존 전략·보유 코인을 확인하세요")
+            if request.source_version != source.version or request.source_approval != approval_digest(
+                source, self.settings
+            ):
+                raise ValueError("기존 전략 설정이 변경되었습니다. 이관 내용을 다시 확인하세요")
+            if source.status == "RUNNING":
+                raise ValueError("기존 전략을 중단하고 미체결 대조가 끝난 후 보유를 이관하세요")
+        elif request.source_version is not None or request.source_approval is not None:
+            raise ValueError("이관할 기존 전략 ID가 필요합니다")
+        if any(row is not source for row in funded):
             raise ValueError("같은 코인을 이미 운용하는 전략이 있습니다")
+        if await session.scalar(
+            select(Intent.id).where(
+                Intent.venue.in_(UPBIT_VENUES), Intent.mode == "live", Intent.status.in_(ACTIVE_ORDERS)
+            )
+        ):
+            raise ValueError("미체결·미확인 주문 대조가 끝난 후 준비하세요")
         markets = await self.upbit.markets()
         if not market_eligible(markets.get(request.symbol)):
             raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
@@ -220,16 +270,72 @@ class Engine:
         if not quotes:
             raise ValueError("최신 호가를 확인할 수 없습니다")
         spec = inventory_grid_spec(request, chance, quotes[0])
-        # The temporary object is never inserted until account/test checks pass.
         draft = Strategy(
-            venue="upbit",
+            venue=venue,
             mode="live",
             symbol=spec.symbol,
             config=spec.model_dump(mode="json"),
             state={"funded": False, "quantity": "0", "cash": "0"},
         )
-        await self.check_live_start(draft)
+        await self.check_live_start(draft, session)
+        account = await session.get(AccountState, {"venue": venue, "mode": "live"})
+        if account.halted:
+            raise ValueError("새 시장의 위험 중단 상태를 확인한 후 이관하세요")
+        allocated = sum(
+            (D(r.config["budget"]) for r in existing if r.venue == venue and r.state.get("funded")), D(0)
+        )
+        settled = sum(
+            (
+                settlement_value(r) - D(r.config["budget"])
+                for r in existing
+                if r.venue == venue and r.state.get("settled")
+            ),
+            D(0),
+        )
+        if spec.budget + allocated > min(account.capital, account.capital + settled):
+            raise ValueError("새 시장의 배정 가능한 예산보다 보유 평가액이 큽니다")
+        released_value = D(0)
+        if source:
+            if D(source.state["quantity"]) != spec.inventory_quantity:
+                raise ValueError("기존 장부와 실제 보유 수량이 다릅니다")
+            source_quotes = await self.upbit.orderbooks([source.symbol])
+            if not source_quotes or not source_quotes[0].valid(
+                StrategySpec.model_validate(source.config), datetime.now(UTC)
+            ):
+                raise ValueError("기존 시장의 최신 평가 가격을 확인할 수 없습니다")
+            released_value = spec.inventory_quantity * source_quotes[0].bid
+        # All broker checks precede book mutation; no sale, commission or FX is recorded.
         row = await create_strategy(session, f"{spec.symbol} 보유 전량 반복 그리드", spec, "live")
+        if source:
+            source.state = {
+                **source.state,
+                "funded": False,
+                "settled": True,
+                "released_quantity": source.state["quantity"],
+                "released_value": str(released_value),
+                "released_currency": currency(source.venue),
+                "closed_unrealized": str(released_value - D(source.state["cost_basis"])),
+                "quantity": "0",
+                "cost_basis": "0",
+                "lots": {},
+                "transferred_to": row.id,
+            }
+            source.status, source.reason = "ARCHIVED", "보유 장부 이관 — 실제 매도·환전 없음, 기존 현금 유지"
+            row.state = {**row.state, "transferred_from": source.id}
+            session.add(
+                Event(
+                    kind="transfer",
+                    strategy_id=source.id,
+                    message=source.reason,
+                    data={
+                        "target_id": row.id,
+                        "quantity": str(spec.inventory_quantity),
+                        "valuation": str(released_value),
+                        "currency": currency(source.venue),
+                    },
+                    notify=True,
+                )
+            )
         session.add(
             Event(
                 kind="strategy",
@@ -242,7 +348,7 @@ class Engine:
     async def reconnect(self):
         self.refresh = True
         self.reset_grid_reference = True
-        self.quotes = {k: v for k, v in self.quotes.items() if k.startswith("KRW-")}
+        self.quotes = {k: v for k, v in self.quotes.items() if k.startswith(("KRW-", "USDT-"))}
 
     def on_quote(self, quote):
         previous = self.quotes.get(quote.symbol)
@@ -317,7 +423,7 @@ class Engine:
                     if command.action in {"start", "check_live"}:
                         row = await session.get(Strategy, command.payload.get("strategy_id", ""))
                         if row and row.mode == "live":
-                            await self.check_live_start(row)
+                            await self.check_live_start(row, session)
                             checked = True
                     if command.action == "check_live":
                         if not checked:
@@ -340,9 +446,7 @@ class Engine:
                 await session.scalars(select(Strategy).where(Strategy.status.in_(["RUNNING", "PAUSED"])))
             ).all()
         symbols = sorted({s.symbol for s in strategies if s.venue == "toss" and s.state.get("funded")})
-        crypto_symbols = sorted(
-            {s.symbol for s in strategies if s.venue == "upbit" and s.state.get("funded")}
-        )
+        crypto_symbols = sorted({s.symbol for s in strategies if is_upbit(s.venue) and s.state.get("funded")})
         at = datetime.now(UTC)
         if self.settings.account_reads_enabled and (at - self.last_account_refresh).total_seconds() >= 60:
             await self.refresh_account(at)
@@ -351,7 +455,7 @@ class Engine:
                 await self.market_refresh(symbols, at)
                 self.market_error = ""
             except BrokerError as exc:
-                self.quotes = {k: v for k, v in self.quotes.items() if k.startswith("KRW-")}
+                self.quotes = {k: v for k, v in self.quotes.items() if k.startswith(("KRW-", "USDT-"))}
                 self.market_error = exc.code
         await self.resolve_commands()
         if self.settings.upbit_enabled:
@@ -370,7 +474,8 @@ class Engine:
                     row.state = {**row.state, "last_mid": None}
                 self.reset_grid_reference = False
             await check_risk(session, self.settings, self.quotes, market[1] if market else "")
-            await check_risk(session, self.settings, self.quotes, at.date().isoformat(), venue="upbit")
+            for venue in UPBIT_VENUES:
+                await check_risk(session, self.settings, self.quotes, at.date().isoformat(), venue=venue)
         if not execution_error:
             await self.evaluate(at, toss_open=bool(market))
         await self.cancel_stopped()
@@ -442,7 +547,9 @@ class Engine:
                     "status": "CONNECTED",
                     "snapshot": snapshot,
                     "error": None,
-                    "read_only": not self.settings.upbit_live_enabled,
+                    "read_only": not (
+                        self.settings.upbit_live_enabled or self.settings.upbit_usdt_live_enabled
+                    ),
                 }
             except (BrokerError, KeyError, TypeError, ValueError) as exc:
                 async with self.sessions() as session:
@@ -451,7 +558,9 @@ class Engine:
                     "status": "ERROR",
                     "error": exc.code if isinstance(exc, BrokerError) else "invalid-upbit-response",
                     "snapshot": previous.data.get("snapshot") if previous else None,
-                    "read_only": not self.settings.upbit_live_enabled,
+                    "read_only": not (
+                        self.settings.upbit_live_enabled or self.settings.upbit_usdt_live_enabled
+                    ),
                 }
             async with self.sessions.begin() as session:
                 await put_runtime(session, "upbit_account", data)
@@ -469,12 +578,14 @@ class Engine:
                 for symbol in valid:
                     data = await self.upbit.candles(symbol)
                     async with self.sessions.begin() as session:
-                        await self.save_candles(session, symbol, "1m", data["candles"], venue="upbit")
+                        await self.save_candles(
+                            session, symbol, "1m", data["candles"], venue=upbit_venue(symbol)
+                        )
                 self.last_upbit_candle = minute
             self.upbit_error = ""
         except (BrokerError, KeyError, TypeError, ValueError) as exc:
             self.upbit_error = exc.code if isinstance(exc, BrokerError) else "invalid-upbit-market-response"
-            self.quotes = {k: v for k, v in self.quotes.items() if not k.startswith("KRW-")}
+            self.quotes = {k: v for k, v in self.quotes.items() if not k.startswith(("KRW-", "USDT-"))}
         async with self.sessions.begin() as session:
             await put_runtime(
                 session,
@@ -586,7 +697,7 @@ class Engine:
         for intent in intents:
             if intent.mode == "paper":
                 await self.paper_fill(intent.id)
-            elif intent.venue == "upbit" and (intent.broker_id or intent.status in {"SENDING", "UNKNOWN"}):
+            elif is_upbit(intent.venue) and (intent.broker_id or intent.status in {"SENDING", "UNKNOWN"}):
                 # A timed-out Upbit POST is never resubmitted. Identifier lookup survives restarts.
                 try:
                     order = (
@@ -666,7 +777,10 @@ class Engine:
             strategy = await session.get(Strategy, intent.strategy_id)
             if intent.status == "PREPARED":
                 return
-            if strategy.status != "RUNNING" or now() - intent.created_at > timedelta(seconds=60):
+            if strategy.status != "RUNNING" or (
+                strategy.config.get("execution_policy") != "maker_only"
+                and now() - intent.created_at > timedelta(seconds=60)
+            ):
                 intent.status = "CANCELED"
                 return
             quote = self.quotes.get(intent.symbol)
@@ -687,7 +801,9 @@ class Engine:
             if not crosses or quantity <= 0:
                 return
             filled = intent.filled_quantity + quantity
-            amount = intent.filled_amount + quantity * price
+            amount = intent.filled_amount + quantity * (
+                intent.price if spec.execution_policy == "maker_only" else price
+            )
             await record_execution(
                 session,
                 intent,
@@ -716,26 +832,34 @@ class Engine:
             return
         holdings, open_orders = {}, []
         if any(s.venue == "toss" for s in strategies):
-            holdings.update({r["symbol"]: D(r["quantity"]) for r in (await self.broker.holdings())["items"]})
-            open_orders.extend(await self.broker.orders())
-        if any(s.venue == "upbit" for s in strategies):
+            holdings.update(
+                {
+                    asset_key("toss", r["symbol"]): D(r["quantity"])
+                    for r in (await self.broker.holdings())["items"]
+                }
+            )
+            open_orders.extend(
+                (asset_key("toss", o["symbol"]), o["orderId"]) for o in await self.broker.orders()
+            )
+        if any(is_upbit(s.venue) for s in strategies):
             snapshot = await self.upbit.account_snapshot()
             holdings.update(
                 {
-                    "KRW-" + r["currency"]: amount(r["balance"]) + amount(r["locked"])
+                    "upbit:" + r["currency"]: amount(r["balance"]) + amount(r["locked"])
                     for r in snapshot["assets"]
                 }
             )
-            open_orders.extend(await self.upbit.orders())
+            open_orders.extend(
+                (asset_key("upbit", o["symbol"]), o["orderId"]) for o in await self.upbit.orders()
+            )
         own_ids = {r.broker_id for r in intents if r.broker_id}
-        pending_symbols = {r.symbol for r in intents if r.status in ACTIVE_ORDERS}
+        pending_symbols = {asset_key(r.venue, r.symbol) for r in intents if r.status in ACTIVE_ORDERS}
         for strategy in strategies:
+            key = asset_key(strategy.venue, strategy.symbol)
             foreign_order = any(
-                o["symbol"] == strategy.symbol and o["orderId"] not in own_ids for o in open_orders
+                order_key == key and order_id not in own_ids for order_key, order_id in open_orders
             )
-            mismatch = strategy.symbol not in pending_symbols and holdings.get(strategy.symbol, D(0)) != D(
-                strategy.state["quantity"]
-            )
+            mismatch = key not in pending_symbols and holdings.get(key, D(0)) != D(strategy.state["quantity"])
             if foreign_order or mismatch:
                 async with self.sessions.begin() as session:
                     row = await session.get(Strategy, strategy.id)
@@ -754,7 +878,9 @@ class Engine:
                 )
             ).all()
         for intent, strategy in pairs:
-            expired = now() - intent.created_at > timedelta(seconds=60)
+            expired = strategy.config.get(
+                "execution_policy"
+            ) != "maker_only" and now() - intent.created_at > timedelta(seconds=60)
             if strategy.status == "RUNNING" and not expired:
                 continue
             if intent.status == "PREPARED" or intent.mode == "paper":
@@ -764,7 +890,7 @@ class Engine:
             elif intent.broker_id and self.settings.live_for(intent.venue):
                 await self.lock.verify()
                 try:
-                    await (self.upbit if intent.venue == "upbit" else self.broker).cancel(intent.broker_id)
+                    await (self.upbit if is_upbit(intent.venue) else self.broker).cancel(intent.broker_id)
                 except BrokerError as exc:
                     if exc.code not in {"already-filled", "already-canceled", "already-processing"}:
                         LOG.warning("cancel pending: %s", exc.code)
@@ -780,7 +906,7 @@ class Engine:
                 if strategy.venue == "toss" and not toss_open:
                     strategy.reason = "휴장 또는 세션 전환"
                     continue
-                if strategy.venue == "upbit" and not self.settings.upbit_enabled:
+                if is_upbit(strategy.venue) and not self.settings.upbit_enabled:
                     strategy.reason = "업비트 시세 연결 대기"
                     continue
                 if strategy.mode == "live" and not self.settings.live_for(strategy.venue):
@@ -804,7 +930,7 @@ class Engine:
                     continue
                 stock = self.stocks.get(strategy.symbol, {})
                 eligible = stock_eligible(stock)
-                if strategy.venue == "upbit":
+                if is_upbit(strategy.venue):
                     market = self.upbit_markets.get(strategy.symbol)
                     eligible = market_eligible(market)
                 if not eligible:
@@ -814,16 +940,35 @@ class Engine:
                 if not quote or not quote.valid(spec, at):
                     strategy.reason = "신선한 양방향 호가 또는 허용 호가 차이 조건 대기"
                     continue
-                if await session.scalar(
-                    select(Intent.id).where(
-                        Intent.mode == strategy.mode,
-                        Intent.venue == strategy.venue,
-                        Intent.symbol == strategy.symbol,
-                        Intent.status.in_(ACTIVE_ORDERS),
+                active = (
+                    await session.scalars(
+                        select(Intent).where(
+                            Intent.mode == strategy.mode,
+                            Intent.venue == strategy.venue,
+                            Intent.symbol == strategy.symbol,
+                            Intent.status.in_(ACTIVE_ORDERS),
+                        )
                     )
+                ).all()
+                if active and (
+                    spec.execution_policy != "maker_only"
+                    or any(r.status in {"UNKNOWN", "SENDING", "PENDING_CANCEL"} for r in active)
                 ):
                     strategy.reason = "기존 주문 결과 확인 중"
                     continue
+                blocked_slots = {r.slot for r in active}
+                if spec.execution_policy == "maker_only":
+                    recent = (
+                        await session.scalars(
+                            select(Intent).where(
+                                Intent.strategy_id == strategy.id,
+                                Intent.status.in_(["REJECTED", "CANCELED"]),
+                                Intent.filled_quantity == 0,
+                                Intent.created_at > now() - timedelta(seconds=10),
+                            )
+                        )
+                    ).all()
+                    blocked_slots.update(r.slot for r in recent)
                 rows = (
                     await session.scalars(
                         select(CandleRow)
@@ -839,7 +984,9 @@ class Engine:
                 ).all()
                 bars = sorted([Bar.parse(row.data) for row in rows], key=lambda b: b.at)
                 state = json.loads(json.dumps(strategy.state))
-                decision, reason = decide(spec, state, quote, aggregate(bars, spec.timeframe, at))
+                decision, reason = decide(
+                    spec, state, quote, aggregate(bars, spec.timeframe, at), blocked_slots=blocked_slots
+                )
                 strategy.state, strategy.reason = state, reason
                 if reason == "GRID_LOWER_BREACH":
                     strategy.status, strategy.reason = "PAUSED", "그리드 하단 이탈 — 보유 유지"
@@ -892,7 +1039,7 @@ class Engine:
                 unknown = await session.scalar(
                     select(Intent.id).where(
                         Intent.mode == intent.mode,
-                        Intent.venue == intent.venue,
+                        Intent.venue.in_(UPBIT_VENUES if is_upbit(intent.venue) else [intent.venue]),
                         Intent.status.in_(["UNKNOWN", "SENDING"]),
                     )
                 )
@@ -920,7 +1067,8 @@ class Engine:
             return
         if strategy.status != "RUNNING" or account.halted or not self.settings.live_for(intent.venue):
             return
-        if intent.venue == "upbit" and recovery:
+        maker_only = strategy.config.get("execution_policy") == "maker_only"
+        if is_upbit(intent.venue) and recovery:
             return  # Identifier lookup only; never a second POST after an ambiguous response.
         if recovery and (intent.submitted_at is None or now() - intent.submitted_at >= timedelta(minutes=9)):
             return
@@ -932,7 +1080,7 @@ class Engine:
                 or not quote.valid(StrategySpec.model_validate(strategy.config), datetime.now(UTC))
             ):
                 return
-            if intent.venue == "upbit":
+            if is_upbit(intent.venue):
                 try:
                     chance = await self.upbit.chance(intent.symbol)
                     available, sellable, _ = upbit_policy(
@@ -941,7 +1089,33 @@ class Engine:
                         D(strategy.config["commission_rate"]),
                         side="bid" if intent.side == "BUY" else "ask",
                         total=intent.price * intent.quantity,
+                        maker_only=maker_only,
                     )
+                    if maker_only:
+                        crossed = (
+                            intent.price <= quote.bid if intent.side == "SELL" else intent.price >= quote.ask
+                        )
+                        orders = await self.upbit.orders()
+                        opposite = "BUY" if intent.side == "SELL" else "SELL"
+                        crossed = crossed or any(
+                            o["symbol"] == intent.symbol
+                            and o.get("side") == opposite
+                            and o.get("price") is not None
+                            and (
+                                intent.price <= D(o["price"])
+                                if intent.side == "SELL"
+                                else intent.price >= D(o["price"])
+                            )
+                            for o in orders
+                        )
+                        if crossed:
+                            async with self.sessions.begin() as session:
+                                row = await session.get(Intent, intent_id)
+                                row.status, row.reason = (
+                                    "CANCELED",
+                                    "메이커 전용 가격·자전 체결 방지 조건 대기",
+                                )
+                            return
                     if not market_eligible(self.upbit_markets.get(intent.symbol)):
                         raise ValueError("업비트 거래 유의·주의 상태 확인 필요")
                     if intent.side == "BUY" and intent.price * intent.quantity * (
@@ -956,6 +1130,12 @@ class Engine:
                     async with self.sessions.begin() as session:
                         row = await session.get(Intent, intent_id)
                         row.status, row.reason = "REJECTED", str(exc)
+                        if "수수료" in str(exc):
+                            owner = await session.get(Strategy, row.strategy_id)
+                            owner.status, owner.reason = "PAUSED", str(exc)
+                            session.add(
+                                Event(kind="risk", strategy_id=owner.id, message=owner.reason, notify=True)
+                            )
                     return
             elif intent.side == "BUY":
                 available = await self.broker.buying_power()
@@ -987,7 +1167,11 @@ class Engine:
             if intent.submitted_at is None:
                 intent.submitted_at = now()
         try:
-            result = await (self.upbit if intent.venue == "upbit" else self.broker).place(intent)
+            result = (
+                await self.upbit.place(intent, maker_only=maker_only)
+                if is_upbit(intent.venue)
+                else await self.broker.place(intent)
+            )
         except BrokerError as exc:
             async with self.sessions.begin() as session:
                 row = await session.get(Intent, intent_id)
@@ -1020,12 +1204,12 @@ class Engine:
             venue = payload.get("venue", "toss")
             if venue == "toss" and self.settings.market_source != "toss":
                 raise ValueError("토스 시세 연결이 비활성입니다")
-            if venue == "upbit" and not self.settings.upbit_enabled:
+            if is_upbit(venue) and not self.settings.upbit_enabled:
                 raise ValueError("업비트 시세 연결이 비활성입니다")
-            broker = self.upbit if venue == "upbit" else self.broker
+            broker = self.upbit if is_upbit(venue) else self.broker
             if (
                 payload.get("require_eligible")
-                and venue == "upbit"
+                and is_upbit(venue)
                 and not market_eligible(self.upbit_markets.get(payload["symbol"]))
             ):
                 raise ValueError("시작 후보의 현재 거래 유의·주의 상태를 확인할 수 없거나 해당 상태입니다")
@@ -1072,13 +1256,13 @@ class Engine:
                     detached = await session.get(Intent, command.payload["intent_id"])
                 if not detached:
                     raise ValueError("대조할 주문이 없습니다")
-                broker = self.upbit if detached.venue == "upbit" else self.broker
+                broker = self.upbit if is_upbit(detached.venue) else self.broker
                 order = await broker.order(command.payload["broker_id"])
                 async with self.sessions.begin() as session:
                     intent = await session.get(Intent, command.payload["intent_id"])
                     if not intent or intent.mode != "live" or intent.status != "UNKNOWN":
                         raise ValueError("대조할 미확인 실거래 주문이 없습니다")
-                    if intent.venue == "upbit" and order.get("clientOrderId") != intent.id:
+                    if is_upbit(intent.venue) and order.get("clientOrderId") != intent.id:
                         raise ValueError("업비트 주문 식별자가 일치하지 않습니다")
                     if (
                         order["symbol"],

@@ -20,7 +20,7 @@ from cotrader.domain import (
     initial_state,
     tick,
 )
-from cotrader.markets import round_quantity
+from cotrader.markets import currency, round_quantity
 
 DEFAULT_DAILY_LOSS = D("50")
 DEFAULT_DRAWDOWN = D("250")
@@ -172,7 +172,7 @@ def backtest(
         "gaps": gaps,
         "config": spec.model_dump(mode="json"),
         "venue": spec.venue,
-        "currency": "KRW" if spec.venue == "upbit" else "USD",
+        "currency": currency(spec.venue),
         "limitations": [
             "1분봉 기반 추정: 같은 봉 안의 연쇄 매수·매도는 실행하지 않습니다.",
             "현재 거래 단위를 사용하며 과거 호가 정책 변경을 재현하지 않습니다.",

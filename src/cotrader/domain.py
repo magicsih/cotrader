@@ -5,7 +5,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from cotrader.markets import Venue, order_size_valid, price_tick, round_quantity, validate_symbol
+from cotrader.markets import (
+    Venue,
+    currency,
+    is_upbit,
+    order_size_valid,
+    price_tick,
+    round_quantity,
+    validate_symbol,
+)
 
 D = Decimal
 ZERO = D(0)
@@ -20,6 +28,8 @@ class StrategySpec(BaseModel):
     inventory_quantity: Decimal = Field(default=D(0), ge=0)
     inventory_reference_price: Decimal | None = Field(default=None, gt=0)
     inventory_average_price: Decimal | None = Field(default=None, ge=0)
+    inventory_average_currency: str | None = Field(default=None, pattern=r"^(KRW|USDT)$")
+    execution_policy: Literal["trigger_limit", "maker_only"] = "trigger_limit"
     lower: Decimal | None = Field(default=None, gt=0)
     upper: Decimal | None = Field(default=None, gt=0)
     grids: int = Field(default=5, ge=2, le=30)
@@ -39,8 +49,16 @@ class StrategySpec(BaseModel):
     @model_validator(mode="after")
     def validate_grid(self):
         validate_symbol(self.venue, self.symbol)
+        if self.execution_policy == "maker_only" and not (
+            is_upbit(self.venue) and self.kind == "grid" and self.inventory_quantity
+        ):
+            raise ValueError("메이커 전용 주문은 보유 코인 반복 그리드에서 지원합니다")
+        if self.inventory_average_price is not None and self.inventory_average_currency is None:
+            self.inventory_average_currency = currency(self.venue)
+        if self.inventory_average_currency and self.inventory_average_price is None:
+            raise ValueError("평균 매수가 없이 평균가 통화를 지정할 수 없습니다")
         if self.inventory_quantity:
-            if self.venue != "upbit" or self.kind != "grid":
+            if not is_upbit(self.venue) or self.kind != "grid":
                 raise ValueError("보유 코인 편입은 업비트 반복 그리드에서만 지원합니다")
             if self.signal_gate:
                 raise ValueError(
@@ -56,6 +74,8 @@ class StrategySpec(BaseModel):
             raise ValueError("편입 수량 없이 보유 코인 기준가를 지정할 수 없습니다")
         if self.venue == "toss" and self.budget > 5000:
             raise ValueError("미국 주식의 전략 예산은 최대 5,000 USD입니다")
+        if self.venue == "upbit_usdt" and self.budget > 10000:
+            raise ValueError("USDT 전략 예산은 최대 10,000 USDT입니다")
         if self.fast >= self.slow:
             raise ValueError("단기 평균 기간은 장기 평균 기간보다 작아야 합니다")
         if self.kind == "grid":
@@ -68,7 +88,7 @@ class StrategySpec(BaseModel):
                 not order_size_valid(grid_quantity(self, i), p, self.venue) for i, p in enumerate(prices[:-1])
             ):
                 raise ValueError(
-                    "가격선마다 주식은 최소 1주, 코인은 최소 5,000원이 필요합니다. 예산을 늘리거나 단계를 줄이세요"
+                    "가격선마다 최소 1주, 5,000 KRW 또는 0.5 USDT가 필요합니다. 예산을 늘리거나 단계를 줄이세요"
                 )
             minimum_gap = min((b - a) / a for a, b in zip(prices, prices[1:], strict=False))
             if minimum_gap <= self.commission_rate * 2 + self.slippage_bps / D(10000) * 2:
@@ -150,7 +170,12 @@ class Quote:
 
     def fresh(self, spec: StrategySpec, at: datetime) -> bool:
         age = (at - self.at).total_seconds()
-        return bool(self.bid > 0 and self.ask >= self.bid and 0 <= age <= spec.quote_max_age)
+        return bool(
+            self.symbol == spec.symbol
+            and self.bid > 0
+            and self.ask >= self.bid
+            and 0 <= age <= spec.quote_max_age
+        )
 
     def valid(self, spec: StrategySpec, at: datetime) -> bool:
         return self.fresh(spec, at) and (self.ask - self.bid) / self.mid * 10000 <= spec.max_spread_bps
@@ -255,8 +280,12 @@ def aggregate(bars: list[Bar], minutes: int, at: datetime) -> list[Bar]:
     return result
 
 
-def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tuple[Decision | None, str]:
+def decide(
+    spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar], *, blocked_slots=frozenset()
+) -> tuple[Decision | None, str]:
     if spec.inventory_quantity:
+        if spec.execution_policy == "maker_only":
+            return maker_grid_decision(spec, state, quote, blocked_slots)
         return inventory_decision(spec, state, quote)
     if spec.kind == "grid":
         if quote.mid < spec.lower:
@@ -328,6 +357,30 @@ def decide(spec: StrategySpec, state: dict, quote: Quote, bars: list[Bar]) -> tu
         if order_size_valid(quantity, quote.ask, spec.venue):
             return Decision("BUY", quantity, tick(quote.ask, spec.venue), reason), "매수 신호"
     return None, "매매 조건 대기"
+
+
+def maker_grid_decision(spec, state, quote, blocked_slots):
+    prices = levels(spec)
+    for i in range(spec.grids):
+        if i in blocked_slots:
+            continue
+        lot = state["lots"][str(i)]
+        held = D(lot["quantity"])
+        if order_size_valid(held, prices[i + 1], spec.venue):
+            if prices[i + 1] > quote.bid:
+                return Decision(
+                    "SELL", held, prices[i + 1], "메이커 그리드 매도 대기 주문", i
+                ), "매도 대기 주문 준비"
+            continue
+        size = min(
+            grid_quantity(spec, i) - held,
+            round_quantity(D(lot["cash"]) / (prices[i] * (1 + spec.commission_rate)), spec.venue),
+        )
+        if prices[i] < quote.ask and order_size_valid(size, prices[i], spec.venue):
+            return Decision(
+                "BUY", size, prices[i], "매도대금으로 메이커 재매수 대기 주문", i
+            ), "재매수 대기 주문 준비"
+    return None, "메이커 가격·기존 주문 체결 대기"
 
 
 def inventory_decision(spec: StrategySpec, state: dict, quote: Quote):

@@ -17,6 +17,7 @@ from cotrader.research import (
 
 UNIVERSES = {
     "toss": [{"symbol": "SPY", "name": "미국 S&P 500 ETF"}, {"symbol": "QQQ", "name": "나스닥 100 ETF"}],
+    "upbit_usdt": [{"symbol": "USDT-BTC", "name": "비트코인"}, {"symbol": "USDT-ETH", "name": "이더리움"}],
     "upbit": [{"symbol": "KRW-BTC", "name": "비트코인"}, {"symbol": "KRW-ETH", "name": "이더리움"}],
 }
 ACTIVE_DISCOVERIES = ("COLLECTING", "RUNNING", "CANCEL_REQUESTED")

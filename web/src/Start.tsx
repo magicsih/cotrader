@@ -102,7 +102,7 @@ export function Start({
             id="discovery-budget"
             type="number"
             required
-            min={venue === "upbit" ? 5000 : 1}
+            min={venue === "upbit" ? 5000 : venue === "upbit_usdt" ? 0.5 : 1}
             max={data.defaults.budget}
             step="any"
             value={budget}
