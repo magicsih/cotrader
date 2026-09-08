@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cotrader.broker import BrokerError
 from cotrader.domain import ETF_UNIVERSE, D, initial_state, paper_execution
@@ -501,18 +501,21 @@ async def report(session, at):
         days = min((at.replace(tzinfo=None) - r.created_at).days for r in group)
         sells, observed = {}, []
         for r in group:
-            events = (
-                await session.scalars(
-                    select(PaperEvent).where(PaperEvent.portfolio_id == r.id, PaperEvent.kind == "fill")
+            sells[r.id] = await session.scalar(
+                select(func.count(func.distinct(PaperEvent.data["order_id"].as_string()))).where(
+                    PaperEvent.portfolio_id == r.id,
+                    PaperEvent.kind == "fill",
+                    PaperEvent.data["side"].as_string() == "SELL",
                 )
-            ).all()
-            sells[r.id] = len({e.data["order_id"] for e in events if e.data["side"] == "SELL"})
+            )
             navs = (
                 await session.scalars(
-                    select(PaperEvent).where(PaperEvent.portfolio_id == r.id, PaperEvent.kind == "nav")
+                    select(PaperEvent.data["observation_day"].as_string())
+                    .where(PaperEvent.portfolio_id == r.id, PaperEvent.kind == "nav")
+                    .distinct()
                 )
             ).all()
-            observed.append({e.data["observation_day"] for e in navs})
+            observed.append(set(navs))
         common_days = len(set.intersection(*observed))
         fresh = all(
             r.state.get("nav_at") and at - datetime.fromisoformat(r.state["nav_at"]) < timedelta(minutes=2)

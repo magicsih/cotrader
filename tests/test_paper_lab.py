@@ -161,6 +161,49 @@ async def test_closed_etf_session_never_opens_order(db):
         assert "정규장" in row.state["reason"]
 
 
+async def test_trend_exit_sells_existing_quantity_and_preserves_other_account(db):
+    _, sessions = db
+    await start(sessions)
+    async with sessions.begin() as s:
+        row = await s.get(PaperPortfolio, "upbit_usdt-base-v1")
+        row.state = {
+            **row.state,
+            "cash": "7000",
+            "positions": {"USDT-BTC": {"quantity": "2", "cost_basis": "1000", "realized": "0", "costs": "0"}},
+        }
+        h = history()
+        for bars in h["series"].values():
+            bars[-1]["close"] = "100"
+        await advance(s, row, h, quotes(price="100"), AT, True)
+        assert row.state["pending"]["side"] == "SELL"
+        assert row.state["pending"]["quantity"] == "2"
+        later = AT + timedelta(seconds=2)
+        await advance(s, row, h, quotes(later, price="100"), later, True)
+        assert held(row.state, "USDT-BTC") == 0
+        assert D(row.state["cash"]) == D("7199.8")
+        assert D(row.state["realized"]) - D(row.state["costs"]) == D("-800.2")
+        other = await s.get(PaperPortfolio, "upbit_usdt-buffer-v1")
+        assert other.state["cash"] == "8000"
+        assert row.state["action"] == "HOLD"
+
+
+async def test_stale_quotes_never_create_order_or_overwrite_held_valuation(db):
+    _, sessions = db
+    await start(sessions)
+    async with sessions.begin() as s:
+        row = await s.get(PaperPortfolio, "upbit_usdt-base-v1")
+        row.state = {
+            **row.state,
+            "cash": "7501",
+            "nav": "8000",
+            "nav_at": AT.isoformat(),
+            "positions": {"USDT-BTC": {"quantity": "1", "cost_basis": "499", "realized": "0", "costs": "0"}},
+        }
+        await advance(s, row, history(), quotes(AT - timedelta(seconds=30)), AT, True)
+        assert row.state["action"] == "WAIT" and not row.state.get("pending")
+        assert row.state["nav"] == "8000" and row.state["nav_at"] == AT.isoformat()
+
+
 async def test_dividend_entitlement_uses_pre_ex_date_fills_even_if_sold(db):
     _, sessions = db
     await start(sessions)

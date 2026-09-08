@@ -47,6 +47,16 @@ export function PaperLab({ api }: { api: (path: string) => Promise<any> }) {
           {error}
         </div>
       )}
+      {data?.runtime &&
+        Date.now() - new Date(data.runtime.checked_at).getTime() > 120000 && (
+          <div className="banner danger">
+            운용 상태 갱신이 2분 이상 멈췄습니다. 아래는 마지막으로 저장된
+            판단입니다.
+          </div>
+        )}
+      {data?.runtime?.crypto_data_error && (
+        <div className="banner danger">{data.runtime.crypto_data_error}</div>
+      )}
       {!data ? (
         <p>모의 계좌 확인 중…</p>
       ) : !data.portfolios.length ? (
