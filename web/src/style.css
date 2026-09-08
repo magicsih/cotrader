@@ -1919,3 +1919,48 @@ input[type="checkbox"] {
   margin: 5px 0 0;
   font-weight: 600;
 }
+.paper-market {
+  margin-top: 32px;
+}
+.paper-market > p {
+  color: var(--muted, #667085);
+}
+.paper-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+  gap: 18px;
+}
+.paper-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #e3e7eb);
+  border-radius: 16px;
+  padding: 22px;
+  overflow: hidden;
+}
+.paper-card h3 {
+  margin-top: 0;
+}
+.paper-card small {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted, #667085);
+}
+.paper-card p {
+  line-height: 1.7;
+  font-size: 13px;
+}
+.paper-card details {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--line, #e3e7eb);
+}
+.paper-card summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+.paper-card li {
+  margin: 10px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}

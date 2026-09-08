@@ -19,6 +19,7 @@ from cotrader.domain import (
     funded_state,
     grid_quantity,
     levels,
+    paper_execution,
     slot_quantity,
 )
 from cotrader.live import (
@@ -112,6 +113,9 @@ class Engine:
         self.rotation_error = ""
         self.last_rotation_refresh = self.last_market_refresh
         self.rotation_task = None
+        from cotrader.paper_lab import PaperLab
+
+        self.paper_lab = PaperLab(settings, self.sessions, self.upbit) if settings.paper_lab_enabled else None
 
     async def refresh_rotation_history(self, at):
         from cotrader.etf_data import fetch_history
@@ -639,6 +643,8 @@ class Engine:
                         LOG.warning("broker unavailable: %s", exc.code)
                     await asyncio.sleep(1)
         finally:
+            if self.paper_lab:
+                await self.paper_lab.close()
             if self.rotation_task:
                 self.rotation_task.cancel()
                 with contextlib.suppress(
@@ -720,6 +726,12 @@ class Engine:
             }
         )
         crypto_symbols = sorted({s.symbol for s in strategies if is_upbit(s.venue) and s.state.get("funded")})
+        if self.paper_lab:
+            from cotrader.domain import ETF_UNIVERSE
+            from cotrader.paper_lab import CRYPTO_UNIVERSE
+
+            symbols = sorted(set(symbols) | set(ETF_UNIVERSE))
+            crypto_symbols = sorted(set(crypto_symbols) | set(CRYPTO_UNIVERSE))
         at = datetime.now(UTC)
         if self.settings.account_reads_enabled and (at - self.last_account_refresh).total_seconds() >= 60:
             await self.refresh_account(at)
@@ -738,12 +750,21 @@ class Engine:
             except BrokerError as exc:
                 self.quotes = {k: v for k, v in self.quotes.items() if k.startswith(("KRW-", "USDT-"))}
                 self.market_error = exc.code
-        if self.settings.market_source == "toss" and any(s.config["kind"] == "rotation" for s in strategies):
+        if self.settings.market_source == "toss" and (
+            self.paper_lab or any(s.config["kind"] == "rotation" for s in strategies)
+        ):
             await self.refresh_rotation_history(at)
         await self.resolve_commands()
         if self.settings.upbit_enabled:
             await self.upbit_refresh(crypto_symbols, at)
         market = current_session(self.calendar, at)
+        if self.paper_lab:
+            await self.paper_lab.step(
+                datetime.now(UTC),
+                self.quotes,
+                self.rotation_history,
+                bool(market and market[0] == "regularMarket"),
+            )
         # Every cycle reconciles before generating any new intent.
         execution_error = ""
         try:
@@ -1214,19 +1235,20 @@ class Engine:
             ):
                 intent.status = "CANCELED"
                 return
-            price = quote.ask if intent.side == "BUY" else quote.bid
-            crosses = price <= intent.price if intent.side == "BUY" else price >= intent.price
-            depth = quote.ask_size if intent.side == "BUY" else quote.bid_size
-            quantity = min(
+            execution = paper_execution(
+                spec,
+                quote,
+                intent.side,
+                intent.price,
                 intent.quantity - intent.filled_quantity,
-                round_quantity(depth * D("0.1"), spec.venue),
+                intent.updated_at.replace(tzinfo=UTC),
+                datetime.now(UTC),
             )
-            if not crosses or quantity <= 0:
+            if not execution:
                 return
+            quantity, price = execution
             filled = intent.filled_quantity + quantity
-            amount = intent.filled_amount + quantity * (
-                intent.price if spec.execution_policy == "maker_only" else price
-            )
+            amount = intent.filled_amount + quantity * price
             await record_execution(
                 session,
                 intent,

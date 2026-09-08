@@ -100,6 +100,17 @@ def create_app(settings: Settings | None = None, sessions_override=None):
 
     app.include_router(discovery_routes(settings, sessions, serialize))
 
+    @app.get("/api/paper-lab")
+    async def paper_lab(_actor: Actor):
+        from datetime import UTC, datetime
+
+        from cotrader.paper_lab import report
+
+        async with sessions() as session:
+            result = await report(session, datetime.now(UTC))
+            runtime = await session.get(RuntimeState, "paper_lab")
+        return {**result, "enabled": settings.paper_lab_enabled, "runtime": runtime.data if runtime else None}
+
     @app.middleware("http")
     async def headers(request, call_next):
         response = await call_next(request)

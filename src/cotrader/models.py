@@ -180,3 +180,26 @@ class LoginChallenge(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     verifier: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class PaperPortfolio(Base):
+    __tablename__ = "paper_portfolios"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    venue: Mapped[str] = mapped_column(String(12), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    rules: Mapped[dict] = mapped_column(JSON)
+    rules_hash: Mapped[str] = mapped_column(String(64))
+    budget: Mapped[Decimal] = mapped_column(Numeric(28, 10))
+    state: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class PaperEvent(Base):
+    __tablename__ = "paper_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    portfolio_id: Mapped[str] = mapped_column(String(36), index=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    # Deterministic key makes quotes, distributions and daily observations replay-safe.
+    fingerprint: Mapped[str] = mapped_column(String(128), unique=True)
+    data: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)

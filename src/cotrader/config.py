@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     daily_loss_usdt: Decimal = Field(default=Decimal("5"), gt=0)
     drawdown_usdt: Decimal = Field(default=Decimal("25"), gt=0)
     upbit_usdt_auto_recover: bool = False
+    paper_lab_enabled: bool = False
+    paper_lab_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    paper_lab_usdt: Decimal = Field(default=Decimal("0"), ge=0)
     risk_recovery_ratio: Decimal = Field(default=Decimal("0.8"), gt=0, lt=1)
     risk_recovery_seconds: int = Field(default=60, ge=60, le=3600)
     upbit_access_key: SecretStr = Field(default=SecretStr(""), validation_alias="UPBIT_OPEN_API_ACCESS_KEY")
@@ -75,6 +78,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def secure_configuration(self):
+        if self.paper_lab_enabled and (
+            self.live_enabled
+            or self.upbit_live_enabled
+            or self.upbit_usdt_live_enabled
+            or self.upbit_usdt_auto_recover
+        ):
+            raise ValueError("모의 운용 실험 중에는 모든 실거래 및 자동 재개를 꺼야 합니다")
+        if self.paper_lab_enabled and (
+            self.paper_lab_usd <= 0
+            or self.paper_lab_usdt <= 0
+            or self.market_source != "toss"
+            or not self.upbit_enabled
+        ):
+            raise ValueError("모의 운용 실험에는 두 시장의 가상 예산과 실제 시세 연결이 필요합니다")
         if (
             self.telegram_enabled
             and self.runtime_role == "api"

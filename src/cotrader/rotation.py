@@ -1,9 +1,9 @@
 """Fixed monthly ETF policy, with a shared cash ledger and serial orders."""
 
-from decimal import ROUND_DOWN
 from zoneinfo import ZoneInfo
 
 from cotrader.domain import ETF_UNIVERSE, D, Decision, StrategySpec, apply_fill, initial_state, tick
+from cotrader.markets import order_size_valid, round_quantity
 
 NEW_YORK = ZoneInfo("America/New_York")
 LOOKBACK = 252
@@ -27,8 +27,8 @@ def held(state, symbol):
     return D(state.get("positions", {}).get(symbol, {}).get("quantity", "0"))
 
 
-def apply_execution(state, symbol, side, quantity, amount, costs):
-    if symbol not in ETF_UNIVERSE:
+def apply_execution(state, symbol, side, quantity, amount, costs, universe=ETF_UNIVERSE):
+    if symbol not in universe:
         raise ValueError("ETF 교체 전략의 투자 대상과 체결 종목이 다릅니다")
     positions = {key: dict(value) for key, value in state.get("positions", {}).items()}
     position = {**initial_state(D(0)), **positions.get(symbol, {}), "cash": state["cash"]}
@@ -88,41 +88,46 @@ def decide_rotation(spec, state, quotes, series, at, previous_session):
             return None, f"{symbol}의 최신 양방향 호가·호가 차이 확인 대기"
     # Daily rebalance decisions use the prior close, not oscillating intraday weights.
     prices = {symbol: D(str(series[symbol][-1]["close"])) for symbol in ETF_UNIVERSE}
-    nav = D(state["cash"]) + sum((held(state, s) * prices[s] for s in ETF_UNIVERSE), D(0))
+    return allocation_decision(spec, state, quotes, prices, weights, ETF_UNIVERSE, at)
+
+
+def allocation_decision(spec, state, quotes, prices, weights, universe, at):
+    """Shared long-only allocation and serial sell-before-buy sizing."""
+    nav = D(state["cash"]) + sum((held(state, s) * prices[s] for s in universe), D(0))
     if nav <= 0:
         return None, "ETF 공동 운용 자금 확인 필요"
     plan_day = at.astimezone(NEW_YORK).date().isoformat()
     if state.get("plan_day") != plan_day:
         goals = {}
-        for symbol in ETF_UNIVERSE:
+        for symbol in universe:
             quantity = held(state, symbol)
             target = weights.get(symbol, D(0))
             difference = target - quantity * prices[symbol] / nav
             if target == 0:
                 goal = D(0)
             elif abs(difference) >= REBALANCE_BAND:
-                goal = (nav * target / prices[symbol]).to_integral_value(rounding=ROUND_DOWN)
+                goal = round_quantity(nav * target / prices[symbol], spec.venue)
             else:
                 goal = quantity
             goals[symbol] = str(goal)
         state.update(plan_day=plan_day, goals=goals)
     goals = {s: D(v) for s, v in state["goals"].items()}
     for side in ("SELL", "BUY"):
-        for symbol in ETF_UNIVERSE:
+        for symbol in universe:
             delta = goals[symbol] - held(state, symbol)
             if (side == "SELL" and delta >= 0) or (side == "BUY" and delta <= 0):
                 continue
             quote = quotes.get(symbol)
             if not quote or not quote.valid(spec, at):
                 return None, f"{symbol} 최신 호가 확인 대기"
-            price = tick(quote.bid if side == "SELL" else quote.ask, "toss")
+            price = tick(quote.bid if side == "SELL" else quote.ask, spec.venue)
             quantity = abs(delta)
             if side == "BUY":
-                available = (D(state["cash"]) / (price * (1 + spec.commission_rate))).to_integral_value(
-                    rounding=ROUND_DOWN
+                available = round_quantity(
+                    D(state["cash"]) / (price * (1 + spec.commission_rate)), spec.venue
                 )
                 quantity = min(quantity, available)
-            if quantity > 0:
+            if quantity > 0 and order_size_valid(quantity, price, spec.venue):
                 return Decision(
                     side, quantity, price, "ETF 월간 선정·일별 비중 조절", symbol=symbol
                 ), "ETF 비중 조절 주문 준비"

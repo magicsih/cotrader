@@ -360,12 +360,58 @@ def make_plan(snapshot, ledger, db_identity, reserve_btc):
     }
 
 
+def make_return_plan(snapshot, ledger, db_identity, excluded=()):
+    """Return the operator pocket in kind, preserving the main pocket and exclusions."""
+    no_pending(snapshot)
+    excluded = sorted(set(excluded))
+    require(all(re.fullmatch(r"[A-Z0-9]{1,20}", code) for code in excluded), "제외 자산 코드 오류")
+    available = totals(snapshot, "target")
+    assigned = {}
+    for strategy in ledger:
+        require(strategy["status"] != "RUNNING", "반환 전 전략을 중단하세요")
+        if strategy["state"].get("funded"):
+            code = strategy["symbol"].split("-", 1)[1]
+            assigned[code] = assigned.get(code, Decimal(0)) + number(strategy["state"]["quantity"])
+    require(
+        all(available.get(code, Decimal(0)) >= quantity for code, quantity in assigned.items()),
+        "반환 포켓의 실제 수량이 전략 장부보다 적습니다",
+    )
+    require(
+        not any(assigned.get(code, Decimal(0)) for code in excluded),
+        "운용 보유 자산을 반환에서 제외할 수 없습니다",
+    )
+    plan_id = str(uuid4())
+    items = [
+        {"currency": code, "amount": decimal_text(quantity), "identifier": f"ct-{plan_id}-{code}"}
+        for code, quantity in sorted(available.items())
+        if quantity > 0 and code not in excluded
+    ]
+    require(items, "반환할 잔고가 없습니다")
+    return {
+        "schema": 2,
+        "direction": "to-main",
+        "excluded": excluded,
+        "id": plan_id,
+        "created_at": datetime.now(UTC).isoformat(),
+        "reserve_btc": decimal_text(totals(snapshot, "main").get("BTC", Decimal(0))),
+        "snapshot": snapshot,
+        "ledger": ledger,
+        "database": db_identity,
+        "items": items,
+    }
+
+
 def validate_plan(plan):
-    require(plan["schema"] == 1, "지원하지 않는 이전 계획입니다")
+    require(plan["schema"] in {1, 2}, "지원하지 않는 이전 계획입니다")
     require(str(UUID(plan["id"])) == plan["id"], "계획 ID 형식 오류")
     created = datetime.fromisoformat(plan["created_at"])
     require(created.tzinfo is not None and created <= datetime.now(UTC), "계획 생성 시각 오류")
-    regenerated = make_plan(plan["snapshot"], plan["ledger"], plan["database"], plan["reserve_btc"])
+    if plan["schema"] == 2:
+        require(plan.get("direction") == "to-main", "반환 계획의 방향이 다릅니다")
+        regenerated = make_return_plan(plan["snapshot"], plan["ledger"], plan["database"], plan["excluded"])
+        require(plan["reserve_btc"] == regenerated["reserve_btc"], "메인 BTC 원본 잔고가 다릅니다")
+    else:
+        regenerated = make_plan(plan["snapshot"], plan["ledger"], plan["database"], plan["reserve_btc"])
     expected = [
         {**item, "identifier": f"ct-{plan['id']}-{item['currency']}"} for item in regenerated["items"]
     ]
@@ -374,7 +420,8 @@ def validate_plan(plan):
 
 def transfer_body(plan, item):
     identity = plan["snapshot"]["identity"]
-    return {"from": identity["main"]["uuid"], "to": identity["target"]["uuid"], **item}
+    source, target = ("target", "main") if plan["schema"] == 2 else ("main", "target")
+    return {"from": identity[source]["uuid"], "to": identity[target]["uuid"], **item}
 
 
 def compare_balances(plan, snapshot, completed):
@@ -382,11 +429,12 @@ def compare_balances(plan, snapshot, completed):
     no_pending(snapshot)
     require(snapshot["identity"] == plan["snapshot"]["identity"], "포켓 연결이 계획과 다릅니다")
     expected = {role: totals(plan["snapshot"], role) for role in ("main", "target")}
+    source, target = ("target", "main") if plan["schema"] == 2 else ("main", "target")
     for item in plan["items"]:
         if item["identifier"] in completed:
             code, quantity = item["currency"], number(item["amount"])
-            expected["main"][code] -= quantity
-            expected["target"][code] = expected["target"].get(code, Decimal(0)) + quantity
+            expected[source][code] -= quantity
+            expected[target][code] = expected[target].get(code, Decimal(0)) + quantity
     for role in ("main", "target"):
         actual = totals(snapshot, role)
         codes = set(actual) | set(expected[role])
@@ -533,7 +581,12 @@ async def run(args):
                 snapshot = await client.snapshot()
                 await lock.verify()
                 require(ledger == await ledger_evidence(sessions), "조회 도중 장부가 바뀌었습니다")
-                plan = make_plan(snapshot, ledger, db_identity, args.reserve_btc)
+                if args.direction == "to-main":
+                    require(args.reserve_btc is None, "반환에는 --reserve-btc를 지정하지 않습니다")
+                    plan = make_return_plan(snapshot, ledger, db_identity, args.exclude_currency)
+                else:
+                    require(not args.exclude_currency, "제외 자산은 반환 계획에서만 지정합니다")
+                    plan = make_plan(snapshot, ledger, db_identity, args.reserve_btc)
                 private_write(args.output, serialize(plan))
                 print(
                     json.dumps(
@@ -554,6 +607,9 @@ async def run(args):
                 )
 
             await check_ledger()
+            if args.action == "retire":
+                require(plan["schema"] == 2, "메인포켓 반환 후에만 운용 종료할 수 있습니다")
+                require(args.confirm == digest(plan), "검토한 반환 계획의 SHA256이 필요합니다")
             if args.action == "apply":
                 require(args.confirm == digest(plan), "검토한 계획의 SHA256을 --confirm에 입력하세요")
                 with Journal(str(args.plan) + ".journal", plan) as journal:
@@ -563,17 +619,34 @@ async def run(args):
             snapshot = await client.snapshot()
             await check_ledger()
             compare_balances(plan, snapshot, completed)
-            require(
-                totals(snapshot, "main").get("BTC", Decimal(0)) == number(plan["reserve_btc"]),
-                "메인의 BTC가 계획한 보존 수량과 다릅니다",
-            )
+            if plan["schema"] == 1:
+                require(
+                    totals(snapshot, "main").get("BTC", Decimal(0)) == number(plan["reserve_btc"]),
+                    "메인의 BTC가 계획한 보존 수량과 다릅니다",
+                )
             if args.action == "verify" and args.engine_env:
+                require(plan["schema"] == 1, "반환 후에는 실거래 엔진 키 파일을 생성하지 않습니다")
                 private_write(args.engine_env, engine_env(values))
+            if args.action == "retire":
+                from cotrader.retirement import retire_returned
+                from cotrader.upbit import UpbitBroker
+
+                market = UpbitBroker(Settings(runtime_role="research", upbit_enabled=True))
+                try:
+                    symbols = sorted({r["symbol"] for r in plan["ledger"] if number(r["state"]["quantity"])})
+                    quotes = {q.symbol: q for q in await market.orderbooks(symbols)} if symbols else {}
+                    await lock.verify()
+                    async with sessions.begin() as session:
+                        retired = await retire_returned(session, plan, quotes, datetime.now(UTC))
+                    print(json.dumps({"retired": retired, "actual_order_created": False}, ensure_ascii=False))
+                finally:
+                    await market.close()
             print(
                 json.dumps(
                     {
                         "verified": True,
-                        "main_btc": plan["reserve_btc"],
+                        "main_btc": decimal_text(totals(snapshot, "main").get("BTC", Decimal(0))),
+                        "direction": "to-main" if plan["schema"] == 2 else "to-sub",
                         "completed_assets": len(completed),
                         "orders_created": False,
                         "engine_resumed": False,
@@ -590,19 +663,21 @@ def main():
     parser.add_argument("--key-file", default="~/.config/upbit/upbit-api-key.env")
     actions = parser.add_subparsers(dest="action", required=True)
     actions.add_parser("inspect", help="포켓·잔고·주문 조회만 수행")
-    for action in ("plan", "apply", "verify"):
+    for action in ("plan", "apply", "verify", "retire"):
         sub = actions.add_parser(action)
         sub.add_argument("--database-env-file", required=True)
         sub.add_argument("--expected-database", required=True)
         sub.add_argument("--db-host")
         sub.add_argument("--db-port", type=int, default=3306)
         if action == "plan":
-            sub.add_argument("--reserve-btc", required=True)
+            sub.add_argument("--direction", choices=["to-sub", "to-main"], default="to-sub")
+            sub.add_argument("--reserve-btc")
+            sub.add_argument("--exclude-currency", action="append", default=[])
             sub.add_argument("--output", type=Path, required=True)
         else:
             sub.add_argument("--plan", type=Path, required=True)
-        if action == "apply":
-            sub.add_argument("--confirm", required=True, help="계획 생성 시 출력된 SHA256")
+            if action in {"apply", "retire"}:
+                sub.add_argument("--confirm", required=True, help="계획 생성 시 출력된 SHA256")
         if action == "verify":
             sub.add_argument("--engine-env", type=Path, help="검증 후 코트레이더 키를 새 600 파일로 저장")
     args = parser.parse_args()
