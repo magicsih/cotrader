@@ -206,6 +206,19 @@ class Quote:
         return self.fresh(spec, at) and (self.ask - self.bid) / self.mid * 10000 <= spec.max_spread_bps
 
 
+def paper_execution(spec, quote, side, limit, remaining, after, at):
+    """Fill only a later, valid quote; share one depth convention across paper paths."""
+    if not quote or not quote.valid(spec, at) or quote.at <= after:
+        return None
+    price = quote.ask if side == "BUY" else quote.bid
+    crosses = price <= limit if side == "BUY" else price >= limit
+    depth = quote.ask_size if side == "BUY" else quote.bid_size
+    quantity = min(remaining, round_quantity(depth * D("0.1"), spec.venue))
+    if not crosses or quantity <= 0:
+        return None
+    return quantity, limit if spec.execution_policy == "maker_only" else price
+
+
 @dataclass(frozen=True)
 class Bar:
     at: datetime

@@ -6,6 +6,7 @@ import { Start } from "./Start";
 import { Guide } from "./Guide";
 import { ProfitPanel, ProfitReport } from "./ProfitPanel";
 import RotationDetails from "./RotationDetails";
+import { PaperLab } from "./PaperLab";
 import {
   MarketCautionFields,
   MarketCautionSummary,
@@ -29,7 +30,8 @@ import {
 } from "./approval";
 
 type Data = Record<string, any>;
-type Tab = "start" | "overview" | "strategies" | "research" | "orders";
+type Tab =
+  "paper" | "start" | "overview" | "strategies" | "research" | "orders";
 declare global {
   interface Window {
     Telegram?: { WebApp?: { initData: string; ready(): void; expand(): void } };
@@ -228,11 +230,11 @@ function App({
   const params = new URLSearchParams(window.location.search);
   const requestedTab = params.get("view") as Tab;
   const [tab, setTab] = useState<Tab>(
-    ["start", "overview", "strategies", "research", "orders"].includes(
+    ["paper", "start", "overview", "strategies", "research", "orders"].includes(
       requestedTab,
     )
       ? requestedTab
-      : "start",
+      : "paper",
   );
   const [mode, setMode] = useState(
     params.get("mode") === "live" ? "live" : "paper",
@@ -397,6 +399,7 @@ function App({
     : 0;
   const connected = Date.now() - engineTime < 120000;
   const titles: Data = {
+    paper: "모의 운용",
     start: "쉽게 시작",
     overview: "포트폴리오",
     strategies: "내 전략",
@@ -404,6 +407,7 @@ function App({
     orders: "주문과 기록",
   };
   const subtitles: Data = {
+    paper: "같은 예산에서 매매 근거와 비용 후 성과를 비교합니다.",
     start: "시장과 가상 예산을 고르면, 나머지는 함께 찾습니다.",
     overview: "수익뿐 아니라, 보유 자산의 변화까지 확인하세요.",
     strategies: "가격과 예산을 정하고, 확인한 전략만 실행하세요.",
@@ -461,7 +465,14 @@ function App({
         </a>
         <nav>
           {(
-            ["start", "overview", "strategies", "research", "orders"] as Tab[]
+            [
+              "paper",
+              "start",
+              "overview",
+              "strategies",
+              "research",
+              "orders",
+            ] as Tab[]
           ).map((key) => (
             <button
               key={key}
@@ -473,6 +484,7 @@ function App({
               <span className="nav-compact">
                 {
                   {
+                    paper: "모의",
                     start: "시작",
                     overview: "자산",
                     strategies: "전략",
@@ -614,6 +626,7 @@ function App({
               </button>
             </div>
           )}
+          {tab === "paper" && <PaperLab api={api} />}
           {tab === "start" && discoveries && (
             <Start
               data={discoveries}
@@ -1454,9 +1467,9 @@ function App({
                   />
                 </label>
                 <p>
-                  일일 평가금액 하락 {confirm.capital.risk.daily_loss} USDT · 고점 대비
-                  하락 {confirm.capital.risk.drawdown} USDT 기준을 유지합니다.
-                  이미 발생한 손익과 위험 중단 상태도 유지합니다.
+                  일일 평가금액 하락 {confirm.capital.risk.daily_loss} USDT ·
+                  고점 대비 하락 {confirm.capital.risk.drawdown} USDT 기준을
+                  유지합니다. 이미 발생한 손익과 위험 중단 상태도 유지합니다.
                 </p>
                 <p>
                   저장 후 변경된 한도로 전략 설정을 다시 확인해야 시작할 수

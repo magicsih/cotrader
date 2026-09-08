@@ -20,6 +20,7 @@ from cotrader.pockets import (
     env_values,
     ledger_evidence,
     make_plan,
+    make_return_plan,
     migrate,
     number,
     private_read,
@@ -90,9 +91,11 @@ class Exchange:
         self.posts.append(body)
         if self.apply_balances:
             code = body["currency"]
-            source = self.data["balances"]["main"][code]
+            source_role, target_role = ("main", "target") if body["from"] == MAIN else ("target", "main")
+            source = self.data["balances"][source_role][code]
             source["balance"] = str(number(source["balance"]) - number(body["amount"]))
-            self.data["balances"]["target"][code] = {"balance": body["amount"], "locked": "0"}
+            target = self.data["balances"][target_role].setdefault(code, {"balance": "0", "locked": "0"})
+            target["balance"] = str(number(target["balance"]) + number(body["amount"]))
             self.rows[body["identifier"]] = {
                 "uuid": "transfer-fixture",
                 "state": "processing" if self.processing else "done",
@@ -206,6 +209,62 @@ async def test_attempt_without_receipt_is_never_retransmitted(tmp_path):
     with Journal(tmp_path / "journal", p) as journal, pytest.raises(MigrationError, match="재전송하지"):
         await migrate(exchange, p, journal, AsyncMock())
     assert len(exchange.posts) == 1
+
+
+def return_snapshot():
+    value = snapshot()
+    value["balances"]["target"] = value["balances"]["main"]
+    value["balances"]["target"]["APENFT"] = {"balance": "0.00000013", "locked": "0"}
+    value["balances"]["main"] = {"BTC": {"balance": "7", "locked": "0"}}
+    return value
+
+
+async def test_return_preserves_main_assets_exclusion_dust_and_resumes_without_duplicate(tmp_path):
+    exchange = Exchange()
+    exchange.data = return_snapshot()
+    p = make_return_plan(await exchange.snapshot(), LEDGER, {}, ["APENFT"])
+    validate_plan(p)
+    assert {i["currency"] for i in p["items"]} == {"BTC", "ETH", "KRW"}
+    assert transfer_body(p, p["items"][0])["from"] == TARGET
+    exchange.timeout = True
+    with Journal(tmp_path / "return-journal", p) as journal, pytest.raises(MigrationError):
+        await migrate(exchange, p, journal, AsyncMock())
+    with Journal(tmp_path / "return-journal", p) as journal:
+        await migrate(exchange, p, journal, AsyncMock())
+    assert len(exchange.posts) == 3
+    assert len({item["identifier"] for item in exchange.posts}) == 3
+    assert exchange.data["balances"]["main"]["BTC"]["balance"] == "9.25"
+    assert exchange.data["balances"]["main"]["KRW"]["balance"] == "0.123456789"
+    assert exchange.data["balances"]["target"]["APENFT"]["balance"] == "0.00000013"
+    assert "APENFT" not in exchange.data["balances"]["main"]
+
+
+@pytest.mark.parametrize("change", ["locked", "orders", "shortfall", "excluded_holding", "running"])
+def test_return_rejects_unreconciled_assets_or_orders(change):
+    value, ledger, excluded = return_snapshot(), copy.deepcopy(LEDGER), ["APENFT"]
+    if change == "locked":
+        value["balances"]["target"]["BTC"]["locked"] = "1"
+    elif change == "orders":
+        value["orders"]["main"] = [{"uuid": "manual"}]
+    elif change == "shortfall":
+        value["balances"]["target"]["ETH"]["balance"] = "2"
+    elif change == "excluded_holding":
+        excluded.append("ETH")
+    else:
+        ledger[0]["status"] = "RUNNING"
+    with pytest.raises(MigrationError):
+        make_return_plan(value, ledger, {}, excluded)
+
+
+def test_return_rejects_changed_direction_and_excluded_amount():
+    p = make_return_plan(return_snapshot(), LEDGER, {}, ["APENFT"])
+    p["direction"] = "to-sub"
+    with pytest.raises(MigrationError):
+        validate_plan(p)
+    p["direction"] = "to-main"
+    p["items"].append({"currency": "APENFT", "amount": "0.00000013", "identifier": "tampered"})
+    with pytest.raises(MigrationError):
+        validate_plan(p)
 
 
 async def test_processing_receipt_blocks_remaining_assets_until_done(tmp_path):

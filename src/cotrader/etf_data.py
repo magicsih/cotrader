@@ -81,7 +81,7 @@ def parse_history(symbol, document, at):
 async def fetch_history(at, client=None):
     owned = client is None
     client = client or httpx.AsyncClient(timeout=15, headers={"User-Agent": "Cotrader/0.1"})
-    series, hashes = {}, {}
+    series, hashes, distributions = {}, {}, {}
     try:
         for symbol in ETF_UNIVERSE:
             response = await client.get(
@@ -89,13 +89,29 @@ async def fetch_history(at, client=None):
                 params={"range": "2y", "interval": "1d", "events": "div,splits"},
             )
             response.raise_for_status()
-            series[symbol] = parse_history(symbol, response.json(), at)
+            document = response.json()
+            series[symbol] = parse_history(symbol, document, at)
+            events = document["chart"]["result"][0].get("events", {})
+            today = at.astimezone(NEW_YORK).date().isoformat()
+            distributions[symbol] = []
+            for value in events.get("dividends", {}).values():
+                day = datetime.fromtimestamp(value["date"], UTC).astimezone(NEW_YORK).date().isoformat()
+                if day <= today:
+                    distributions[symbol].append({"date": day, "dividend": str(value["amount"])})
+            if any(
+                series[symbol][-1]["date"]
+                < datetime.fromtimestamp(v["date"], UTC).astimezone(NEW_YORK).date().isoformat()
+                <= today
+                for v in events.get("splits", {}).values()
+            ):
+                raise ValueError(f"{symbol} 당일 분할 조정 확인 필요")
             hashes[symbol] = hashlib.sha256(response.content).hexdigest()
         dates = [r["date"] for r in series[ETF_UNIVERSE[0]]]
         if any([r["date"] for r in series[s]] != dates for s in ETF_UNIVERSE):
             raise ValueError("ETF별 일봉 조회 기간이 다릅니다")
         return {
             "series": series,
+            "distributions": distributions,
             "source": "Yahoo Finance public chart",
             "checked_at": at.isoformat(),
             "last_session": dates[-1],
