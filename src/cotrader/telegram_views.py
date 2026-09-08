@@ -9,7 +9,7 @@ from cotrader.markets import UPBIT_CAUTION_LABELS, currency, is_upbit
 from cotrader.services import approval_digest
 
 PAGE_SIZE = 6
-COMMANDS = (
+LIVE_COMMANDS = (
     ("menu", "계좌·주문·전략 메뉴"),
     ("pocket", "코트레이더 포켓 잔고"),
     ("toss", "토스증권 잔고와 보유 종목"),
@@ -22,6 +22,17 @@ COMMANDS = (
     ("web", "Cotrader 웹 화면"),
     ("guide", "사용 가이드"),
     ("help", "명령어와 사용 방법"),
+)
+PAPER_COMMANDS = (
+    ("menu", "모의 운용·실제 계좌 구분 메뉴"),
+    ("paper", "8개 모의 비교 계좌 요약"),
+    ("paper_data", "모의 신호·데이터 근거"),
+    ("pocket", "실제 업비트 포켓 조회"),
+    ("toss", "실제 토스증권 계좌 조회"),
+    ("research", "과거 데이터 전략 발굴"),
+    ("web", "Cotrader 웹 화면"),
+    ("guide", "사용 가이드"),
+    ("help", "명령어와 데이터 출처"),
 )
 STATES = {
     "RUNNING": "운영 중",
@@ -55,6 +66,15 @@ def number(value, places=8):
             return "확인 불가"
         result = f"{amount:,.{places}f}"
         return result.rstrip("0").rstrip(".") if "." in result else result
+    except (InvalidOperation, ValueError):
+        return "확인 불가"
+
+
+def percentage(value, places=2):
+    if value is None:
+        return "확인 불가"
+    try:
+        return f"{number(Decimal(str(value)) * 100, places)}%"
     except (InvalidOperation, ValueError):
         return "확인 불가"
 
@@ -100,23 +120,43 @@ def button(text, data):
     return {"text": text, "callback_data": data}
 
 
-def nav(screen, page=0, total=0):
+def commands(paper_lab_enabled=False):
+    return PAPER_COMMANDS if paper_lab_enabled else LIVE_COMMANDS
+
+
+def nav(screen, page=0, total=0, page_size=PAGE_SIZE):
     pages = []
     if page:
         pages.append(button("‹ 이전", f"nav:{screen}:{page - 1}"))
-    if (page + 1) * PAGE_SIZE < total:
+    if (page + 1) * page_size < total:
         pages.append(button("다음 ›", f"nav:{screen}:{page + 1}"))
     return ([pages] if pages else []) + [
         [button("↻ 새로고침", f"nav:{screen}:{page}"), button("⌂ 메뉴", "nav:menu:0")]
     ]
 
 
-def page_of(rows, page):
-    page = min(page, max(0, (len(rows) - 1) // PAGE_SIZE))
-    return rows[page * PAGE_SIZE : (page + 1) * PAGE_SIZE], page
+def page_of(rows, page, page_size=PAGE_SIZE):
+    page = min(page, max(0, (len(rows) - 1) // page_size))
+    return rows[page * page_size : (page + 1) * page_size], page
 
 
-def menu():
+def menu(paper_lab_enabled=False):
+    if paper_lab_enabled:
+        return [
+            heading("Cotrader · 모의 전용"),
+            paragraph(
+                "8개 독립 가상 계좌가 실제 시세를 관찰합니다. 이 실행 환경은 실제 주문을 만들지 않습니다."
+            ),
+            footer("모의 비교 원장과 실제 계좌 조회 값을 섞지 않습니다. 실제 계좌 버튼은 조회 전용입니다."),
+        ], [
+            [button("🧪 모의 비교 운용", "nav:paper:0"), button("모의 데이터 근거", "nav:paper_data:0")],
+            [
+                button("실제 업비트 계좌 · 조회", "nav:pocket:0"),
+                button("실제 토스 계좌 · 조회", "nav:toss:0"),
+            ],
+            [button("전략 발굴 · 과거 데이터", "nav:research:0")],
+            [button("웹 화면", "nav:web:0"), button("사용 방법", "nav:help:0")],
+        ]
     return [
         heading("Cotrader"),
         paragraph("계좌 현황부터 전략 운영까지, 아래 버튼으로 확인하세요."),
@@ -128,6 +168,153 @@ def menu():
         [button("토스 전략 발굴", "nav:research:0"), button("운영 상태", "nav:status:0")],
         [button("웹 화면", "nav:web:0"), button("사용 방법", "nav:help:0")],
     ]
+
+
+def paper_only_notice():
+    return [
+        heading("모의 전용 실행 환경"),
+        paragraph("현재 봇은 비교 모의 운용만 표시합니다. 실거래 전략·주문·중단 명령은 접수하지 않았습니다."),
+        footer("모의 계좌는 /paper, 실제 계좌의 마지막 조회 값은 /pocket 또는 /toss에서 확인하세요."),
+    ], [
+        [button("모의 비교 운용", "nav:paper:0"), button("모의 데이터 근거", "nav:paper_data:0")],
+        [button("실제 업비트 계좌 · 조회", "nav:pocket:0"), button("실제 토스 계좌 · 조회", "nav:toss:0")],
+    ]
+
+
+def _paper_runtime_blocks(report, runtime):
+    blocks = []
+    if not report.get("enabled"):
+        blocks.append(paragraph("⚠ 모의 운용 설정이 꺼져 있습니다. 아래 값은 저장된 마지막 기록입니다."))
+    checked_at = (runtime or {}).get("checked_at")
+    try:
+        checked = datetime.fromisoformat(checked_at) if checked_at else None
+        at = datetime.fromisoformat(report["at"])
+        if checked:
+            checked = checked.replace(tzinfo=checked.tzinfo or UTC)
+            at = at.replace(tzinfo=at.tzinfo or UTC)
+    except (KeyError, TypeError, ValueError):
+        checked = None
+    if not checked:
+        blocks.append(paragraph("⚠ 모의 실행기의 갱신 시각을 확인할 수 없습니다."))
+    elif (at - checked).total_seconds() > 120:
+        blocks.append(
+            paragraph("⚠ 모의 실행기 갱신이 2분 이상 멈췄습니다. 마지막 저장 값을 현재값으로 보지 마세요.")
+        )
+    if (runtime or {}).get("crypto_data_error"):
+        blocks.append(paragraph(f"⚠ {(runtime or {})['crypto_data_error']}"))
+    return blocks
+
+
+def paper(report, runtime=None, page=0):
+    rows = report.get("portfolios", [])
+    visible, page = page_of(rows, page, 4)
+    blocks = [
+        heading("모의 비교 운용 · 실제 주문 없음"),
+        paragraph(
+            "미국 ETF와 업비트 USDT를 시장별 4개 독립 가상 계좌로 비교합니다. 계좌별 예산은 합산 투자금이 아닙니다."
+        ),
+        *_paper_runtime_blocks(report, runtime),
+    ]
+    if not rows:
+        blocks.append(paragraph("모의 계좌가 아직 생성되지 않았습니다. 시세와 가상 예산 설정을 확인하세요."))
+    else:
+        table_rows = []
+        for row in visible:
+            state = row.get("state", {})
+            unit = "USD" if row["venue"] == "toss" else "USDT"
+            venue = "미국 ETF" if row["venue"] == "toss" else "암호화폐"
+            table_rows.append(
+                [
+                    f"{venue}\n{row['name']}",
+                    {"BUY": "매수", "SELL": "매도", "HOLD": "유지", "WAIT": "대기"}.get(
+                        state.get("action"), state.get("action", "확인 전")
+                    ),
+                    f"{number(state.get('nav'), 2)} {unit}",
+                    f"{number(state.get('return_pct'), 2)}%",
+                    percentage(state.get("max_drawdown")),
+                ]
+            )
+        blocks.append(table(["시장·계좌", "판단", "평가액", "수익률", "최대 하락"], table_rows))
+        blocks.append(footer(f"가상 계좌 {len(rows)}개 · {page + 1}/{(len(rows) + 3) // 4}쪽"))
+        for evaluation in report.get("evaluations", []):
+            if evaluation["venue"] not in {row["venue"] for row in visible}:
+                continue
+            label = "미국 ETF" if evaluation["venue"] == "toss" else "암호화폐"
+            status = "추가 검증 후보" if evaluation["status"] == "REVIEW" else "자료 수집 계속"
+            sells = list(evaluation.get("sell_orders", {}).values())
+            blocks.append(
+                paragraph(
+                    f"{label} · {status}\n"
+                    f"공통 관찰 {evaluation.get('common_observation_days', 0)}일 · 전략별 최소 매도 {min(sells) if sells else 0}건\n"
+                    f"{evaluation['reason']}\n다음 90일 검토 {when(evaluation.get('next_review_at'))}"
+                )
+            )
+    return blocks, nav("paper", page, len(rows), 4) + [
+        [button("신호·데이터 근거", f"nav:paper_data:{min(page * 4, max(0, len(rows) - 1))}")]
+    ]
+
+
+def paper_data(report, runtime=None, page=0):
+    rows = report.get("portfolios", [])
+    visible, page = page_of(rows, page, 1)
+    blocks = [
+        heading("모의 데이터 근거"),
+        paragraph(
+            "paper_portfolios와 paper_events만 읽습니다. 실제 계좌 잔고·실거래 원장은 포함하지 않습니다."
+        ),
+        *_paper_runtime_blocks(report, runtime),
+    ]
+    if not visible:
+        blocks.append(paragraph("확인할 모의 계좌 데이터가 없습니다."))
+        return blocks, nav("paper_data")
+    row = visible[0]
+    state = row.get("state", {})
+    label = "미국 ETF" if row["venue"] == "toss" else "암호화폐"
+    action = {"BUY": "매수", "SELL": "매도", "HOLD": "유지", "WAIT": "대기"}.get(
+        state.get("action"), state.get("action", "확인 전")
+    )
+    blocks += [
+        heading(f"{label} · {row['name']}"),
+        paragraph(
+            f"현재 판단 {action}\n대기·차단 사유 {state.get('reason') or '없음'}\n"
+            f"신호 기준일 {state.get('signal_date') or '확인 전'} · 평가 {when(state.get('nav_at'))}\n"
+            f"다음 평가 {when(state.get('next_check_at'))}"
+        ),
+    ]
+    conditions = state.get("conditions", {})
+    if conditions:
+        blocks.append(
+            table(
+                ["종목", "신호값", "평균", "목표"],
+                [
+                    [
+                        symbol,
+                        number(condition.get("value"), 4),
+                        number(condition.get("average"), 4),
+                        percentage(condition.get("target", 0)),
+                    ]
+                    for symbol, condition in conditions.items()
+                ],
+            )
+        )
+        blocks.append(
+            paragraph(
+                "\n".join(
+                    f"{symbol} · 진입 {'통과' if condition.get('enter_pass') else '미통과'} · "
+                    f"이탈 {'통과' if condition.get('exit_pass') else '미통과'}"
+                    for symbol, condition in conditions.items()
+                )
+            )
+        )
+    else:
+        blocks.append(paragraph("신호 값과 조건 판정은 아직 저장되지 않았습니다."))
+    blocks.append(
+        footer(
+            f"규칙 {row['rules_hash'][:12]} · 시세 {str(state.get('history_fingerprint') or '확인 전')[:12]}\n"
+            f"가상 계좌 {page + 1}/{len(rows)}"
+        )
+    )
+    return blocks, nav("paper_data", page, len(rows), 1) + [[button("모의 요약", "nav:paper:0")]]
 
 
 def account_header(data, title):
@@ -144,9 +331,9 @@ def account_header(data, title):
     return blocks
 
 
-def pocket(data, page=0):
+def pocket(data, page=0, paper_lab_enabled=False):
     snapshot = data.get("snapshot") or {}
-    blocks = account_header(data, snapshot.get("account_label") or "업비트 연결 계좌")
+    blocks = account_header(data, f"실제 계좌 · {snapshot.get('account_label') or '업비트 연결 계좌'}")
     balances = snapshot.get("balances")
     if snapshot and balances is None:
         blocks.append(paragraph("코인별 잔고를 확인할 수 없습니다. 다음 계좌 조회를 기다려 주세요."))
@@ -174,14 +361,19 @@ def pocket(data, page=0):
             )
         )
     blocks.append(
-        paragraph("이 계좌에 연결된 포켓의 잔고입니다. 전략별 예산과 손익은 ‘전략 관리’에서 확인하세요.")
+        paragraph(
+            "실제 계좌의 마지막 조회 값입니다. 모의 원장과 합산하지 않습니다."
+            if paper_lab_enabled
+            else "이 계좌에 연결된 포켓의 잔고입니다. 전략별 예산과 손익은 ‘전략 관리’에서 확인하세요."
+        )
     )
-    return blocks, nav("pocket", page, len(balances or [])) + [
-        [button("미체결 주문", "nav:orders:0"), button("전략 관리", "nav:strategies:0")]
-    ]
+    buttons = nav("pocket", page, len(balances or []))
+    if not paper_lab_enabled:
+        buttons.append([button("미체결 주문", "nav:orders:0"), button("전략 관리", "nav:strategies:0")])
+    return blocks, buttons
 
 
-def toss(data, page=0):
+def toss(data, page=0, paper_lab_enabled=False):
     snapshot = data.get("snapshot") or {}
     blocks = account_header(data, "토스증권 · 실제 계좌")
     holdings = snapshot.get("holdings", {}).get("items", [])
@@ -215,6 +407,8 @@ def toss(data, page=0):
                 f"증권사 미체결 {len(snapshot.get('open_orders', []))}건 · 미국 수수료 {number(Decimal(rate) * 100, 4) if rate is not None else '확인 불가'}%\n조회 {when(snapshot.get('checked_at'))} · 자동 갱신 약 60초"
             )
         )
+    if paper_lab_enabled:
+        blocks.append(paragraph("실제 계좌의 마지막 조회 값입니다. 모의 원장과 합산하지 않습니다."))
     return blocks, nav("toss", page, len(holdings)) + [[button("토스 전략 발굴", "nav:research:0")]]
 
 

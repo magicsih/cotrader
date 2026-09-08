@@ -87,7 +87,7 @@ class TelegramBot:
                         "scope": {"type": "chat", "chat_id": self.settings.telegram_me},
                         "commands": [
                             {"command": command, "description": description}
-                            for command, description in view.COMMANDS
+                            for command, description in view.commands(self.settings.paper_lab_enabled)
                         ],
                     },
                 )
@@ -150,20 +150,39 @@ class TelegramBot:
     async def screen(self, name, page=0, message_id=None, strategy_id=None, notice=None, research_id=None):
         async with self.sessions() as session:
             if name in {"menu", "help"}:
-                blocks, buttons = view.menu()
+                blocks, buttons = view.menu(self.settings.paper_lab_enabled)
                 if name == "help":
+                    commands = view.commands(self.settings.paper_lab_enabled)
                     blocks += [
-                        view.paragraph(
-                            "\n".join(f"/{cmd} · {description}" for cmd, description in view.COMMANDS)
-                        ),
+                        view.paragraph("\n".join(f"/{cmd} · {description}" for cmd, description in commands)),
                         view.footer(
-                            "/crypto는 /pocket, /account는 /toss와 같습니다. 새로고침은 최근 계좌 조회 값을 다시 표시합니다.\n/pause는 전체 중단을 요청하며 보유 자산은 매도하지 않습니다."
+                            "모의 원장은 /paper와 /paper_data, 실제 계좌 조회는 /pocket과 /toss로 분리합니다."
+                            if self.settings.paper_lab_enabled
+                            else "/crypto는 /pocket, /account는 /toss와 같습니다. 새로고침은 최근 계좌 조회 값을 다시 표시합니다.\n/pause는 전체 중단을 요청하며 보유 자산은 매도하지 않습니다."
                         ),
                     ]
+            elif name in {"paper", "paper_data"}:
+                from datetime import UTC, datetime
+
+                from cotrader.paper_lab import report
+
+                data = await report(session, datetime.now(UTC))
+                data["enabled"] = self.settings.paper_lab_enabled
+                runtime = await session.get(RuntimeState, "paper_lab")
+                blocks, buttons = getattr(view, name)(data, runtime.data if runtime else None, page)
+            elif self.settings.paper_lab_enabled and name in {
+                "detail",
+                "orders",
+                "profit",
+                "status",
+                "strategies",
+                "paper_only",
+            }:
+                blocks, buttons = view.paper_only_notice()
             elif name in {"pocket", "toss"}:
                 key = "upbit_account" if name == "pocket" else "broker_account"
                 data = account_view(await session.get(RuntimeState, key))
-                blocks, buttons = getattr(view, name)(data, page)
+                blocks, buttons = getattr(view, name)(data, page, self.settings.paper_lab_enabled)
             elif name == "profit":
                 blocks, buttons = view.profit(await profit_summary(session))
             elif name == "status":
@@ -237,7 +256,7 @@ class TelegramBot:
                         *view.nav("menu"),
                     ]
             else:
-                blocks, buttons = view.menu()
+                blocks, buttons = view.menu(self.settings.paper_lab_enabled)
                 blocks.insert(1, view.paragraph("알 수 없는 명령입니다. 아래 메뉴를 선택하세요."))
         await self.send(blocks, buttons, message_id=message_id)
 
@@ -255,6 +274,16 @@ class TelegramBot:
             parts = callback.get("data", "").split(":")
             # Read-only navigation remains usable after a restart; approvals do not.
             await self.call("answerCallbackQuery", {"callback_query_id": callback["id"]})
+            if self.settings.paper_lab_enabled and (
+                (
+                    len(parts) == 3
+                    and parts[0] == "nav"
+                    and parts[1] in {"orders", "profit", "status", "strategies"}
+                )
+                or parts[0] in {"detail", "run", "start", "pause"}
+            ):
+                await self.screen("paper_only", message_id=message.get("message_id"))
+                return
             if len(parts) == 3 and parts[0] == "nav" and parts[2].isdigit() and len(parts[2]) <= 6:
                 await self.screen(parts[1], int(parts[2]), message.get("message_id"))
                 return
@@ -311,6 +340,9 @@ class TelegramBot:
         tokens = message.get("text", "").split()
         command = tokens[0].split("@")[0] if tokens else ""
         if command == "/pause":
+            if self.settings.paper_lab_enabled:
+                await self.screen("paper_only")
+                return
             if message.get("date", 0) < self.started_at:
                 return
             async with self.sessions.begin() as session:
@@ -355,8 +387,17 @@ class TelegramBot:
             ).all()
         for event in events:
             # Delivery is at-least-once; include a stable receipt to recognize retries.
-            buttons = [[view.button("운영 상태", "nav:status:0"), view.button("미체결 주문", "nav:orders:0")]]
-            if event.strategy_id:
+            buttons = (
+                [
+                    [
+                        view.button("모의 비교 운용", "nav:paper:0"),
+                        view.button("모의 데이터", "nav:paper_data:0"),
+                    ]
+                ]
+                if self.settings.paper_lab_enabled
+                else [[view.button("운영 상태", "nav:status:0"), view.button("미체결 주문", "nav:orders:0")]]
+            )
+            if event.strategy_id and not self.settings.paper_lab_enabled:
                 buttons.insert(0, [view.button("해당 전략 보기", f"detail:{event.strategy_id}")])
             elif event.data.get("discovery_id"):
                 buttons.insert(0, [view.button("발굴 결과 보기", f"research:{event.data['discovery_id']}")])
@@ -371,15 +412,23 @@ class TelegramBot:
                 row = await session.get(Event, event.id)
                 row.sent = True
         async with self.sessions.begin() as session:
-            heartbeat = await session.get(RuntimeState, "engine")
-            alert = await session.get(RuntimeState, "telegram_engine_alert")
+            runtime_key = "paper_lab" if self.settings.paper_lab_enabled else "engine"
+            alert_key = (
+                "telegram_paper_lab_alert" if self.settings.paper_lab_enabled else "telegram_engine_alert"
+            )
+            heartbeat = await session.get(RuntimeState, runtime_key)
+            alert = await session.get(RuntimeState, alert_key)
             stale = heartbeat is None or now() - heartbeat.updated_at > timedelta(minutes=2)
             if stale and (alert is None or not alert.data.get("stale")):
                 session.add(
                     Event(
                         kind="health",
-                        message="주문 실행기 응답이 2분 이상 없습니다. 미체결 주문은 업비트·토스증권 앱에서 확인하세요.",
+                        message=(
+                            "모의 실행기 갱신이 2분 이상 없습니다. /paper의 마지막 저장 값을 현재값으로 보지 마세요."
+                            if self.settings.paper_lab_enabled
+                            else "주문 실행기 응답이 2분 이상 없습니다. 미체결 주문은 업비트·토스증권 앱에서 확인하세요."
+                        ),
                         notify=True,
                     )
                 )
-            await put_runtime(session, "telegram_engine_alert", {"stale": stale})
+            await put_runtime(session, alert_key, {"stale": stale})

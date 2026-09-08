@@ -38,7 +38,7 @@ ETF는 미국 정규장에서만 체결하고, 신호에는 완성 월말만 사
 3. 별도 백업과 복원 검증 후 `alembic upgrade head`로 모의 계좌·기록 두 테이블을 추가한다. 기존 원장은 변경하지 않는다.
 4. 실제 운용에 배정했던 규모를 읽어 `COTRADER_PAPER_LAB_USD`, `COTRADER_PAPER_LAB_USDT`에 지정한다. 공개 저장소에는 개인 계좌 금액을 기록하지 않는다.
 5. Toss 시세와 Upbit 시세를 켜고 `COTRADER_PAPER_LAB_ENABLED=true`로 engine 하나를 실행한다. 실거래 플래그와 동시 활성화하면 시작이 거절된다.
-6. 인증 후 `/?view=paper` 또는 `/api/paper-lab`에서 8개 독립 계좌와 근거·최근 체결·갱신 시각을 확인한다. 미국 휴장 중 ETF 대기는 정상이다.
+6. 인증 후 `/?view=paper` 또는 `/api/paper-lab`에서 8개 독립 계좌와 근거·최근 체결·갱신 시각을 확인한다. Telegram은 `/paper`에서 비교 요약, `/paper_data`에서 신호 값·조건 판정·대기 사유·다음 평가 시각을 확인한다. 미국 휴장 중 ETF 대기는 정상이다.
 
 포켓 자산을 메인으로 반환할 때는 `python -m cotrader.pockets plan --direction to-main --exclude-currency APENFT`와 기존 파일·DB 인수를 이용한다. 계획의 출발·도착·자산별 수량·해시를 검토하고 `apply`로 한 번 전송한 뒤 `verify`로 실제 잔고와 완료 내역을 확인한다. `retire`는 검증된 반환 계획과 현재 원장을 다시 대조한 뒤 현물 반환으로 종료한다. 이전 손익은 보존하며 매도 체결을 꾸미지 않는다. 전송 결과가 불명확하면 같은 요청을 다시 보내지 않는다.
 

@@ -17,7 +17,7 @@
 | 마이그레이션 | 분리된 DB 사용자로 cotrader 스키마 DDL; 변경 전 백업 |
 | 외부 통신 | 고정 출구 IP를 토스 허용 목록에 등록; REST·WS 모두 확인 |
 | 계좌 | 의도한 종합매매 계좌의 `accountSeq`를 확인하여 설정 |
-| Telegram | 기존 webhook·다른 polling 소비자 없는 전용 봇, 본인 ID |
+| Telegram | `app/cotrader/telegram/bot` 모의·조회 전용 봇, 기존 webhook·다른 polling 소비자 없음, 본인 ID |
 | 백업 | cotrader DB의 클러스터 밖 암호화 백업과 임시 DB 복원 검증 |
 | 장애 감시 | 클러스터 밖에서 API readiness·engine heartbeat 감시 |
 
@@ -29,7 +29,7 @@
 - `cotrader-upbit`: 선택 항목, `UPBIT_OPEN_API_ACCESS_KEY`, `UPBIT_OPEN_API_SECRET_KEY`. 실제 키가 필요한 계좌 조회를 사용할 때만 생성한다.
 - `cotrader-identity`: `TELEGRAM_API_KEY`, `TELEGRAM_ME`, `COTRADER_SESSION_SECRET`, `COTRADER_GITHUB_CLIENT_ID`, `COTRADER_GITHUB_CLIENT_SECRET`, `COTRADER_GITHUB_USER_ID`.
 
-원본 키는 사용자가 지정한 `~/.config/tossinvest/openapi.env`, `~/.config/tossinvest/telegram.env`다. 새 키로 대체하지 않는다. 파일의 실제 값은 대화·로그·Git·이미지에 넣지 않는다. 배포 전 소유자 전용 파일 권한을 확인한다. 세션 서명과 DB 비밀번호는 새 앱 전용 자격증명으로 관리하고 공용 root DB 비밀번호를 앱에 제공하지 않는다.
+자격증명의 기준은 `~/.config/seorilabs` 카탈로그다. Telegram은 활성 논리 ID `app/cotrader/telegram/bot`을 사용하며, 퇴역한 `nats-handler` relay의 토큰을 가져오거나 재사용하지 않는다. 새 키로 대체하지 않고 실제 값은 대화·로그·Git·이미지에 넣지 않는다. 배포 전 소유자 전용 파일 권한을 확인한다. 세션 서명과 DB 비밀번호는 새 앱 전용 자격증명으로 관리하고 공용 root DB 비밀번호를 앱에 제공하지 않는다. 실거래를 다시 활성화할 때는 모의·조회 봇과 별도의 실거래 제어 봇·자격증명·소비자를 준비하고 명시적으로 승인받는다.
 
 Toss·Upbit 키는 engine에만, Telegram 토큰과 세션 서명은 api에만 주입한다. research는 DB 연결만 사용한다. 업비트 공개 시세는 `COTRADER_UPBIT_ENABLED=true`, 계좌 조회는 `COTRADER_UPBIT_ACCOUNT_READS_ENABLED=true`를 추가로 설정한다. 기본 배포 예제는 두 값이 false다. 원화 모의 예산·손실 기준은 `COTRADER_CAPITAL_KRW`, `COTRADER_DAILY_LOSS_KRW`, `COTRADER_DRAWDOWN_KRW`로 달러 설정과 분리한다.
 

@@ -553,6 +553,13 @@ async def report(session, at):
             }
         )
     return {
+        "mode": "paper_lab",
+        "data_contract": {
+            "portfolio_store": "paper_portfolios",
+            "event_store": "paper_events",
+            "account_scope": "independent_virtual_accounts",
+            "actual_account_included": False,
+        },
         "portfolios": result,
         "evaluations": evaluations,
         "actual_order_created": False,

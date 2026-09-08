@@ -246,6 +246,13 @@ async def test_paper_api_requires_auth_and_insufficient_evidence_is_explicit(db)
         assert response.status_code == 200
         body = response.json()
         assert len(body["portfolios"]) == 8 and not body["actual_order_created"]
+        assert body["mode"] == "paper_lab"
+        assert body["data_contract"] == {
+            "portfolio_store": "paper_portfolios",
+            "event_store": "paper_events",
+            "account_scope": "independent_virtual_accounts",
+            "actual_account_included": False,
+        }
         assert all(e["status"] == "KEEP_COLLECTING" for e in body["evaluations"])
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, client=("10.1.1.1", 5000)), base_url="http://example.com"

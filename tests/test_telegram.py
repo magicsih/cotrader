@@ -11,7 +11,8 @@ from sqlalchemy import func, select
 from cotrader import telegram_views as view
 from cotrader.config import Settings
 from cotrader.domain import StrategySpec
-from cotrader.models import Command, RuntimeState
+from cotrader.models import Command, Event, PaperPortfolio, RuntimeState
+from cotrader.paper_lab import bootstrap_lab
 from cotrader.services import approval_digest, create_strategy, enqueue
 from cotrader.telegram import TelegramBot
 from cotrader.upbit import UpbitBroker
@@ -19,6 +20,18 @@ from cotrader.upbit import UpbitBroker
 
 def settings():
     return Settings(TELEGRAM_API_KEY="fixture-token", TELEGRAM_ME=7)
+
+
+def paper_settings():
+    return Settings(
+        TELEGRAM_API_KEY="fixture-token",
+        TELEGRAM_ME=7,
+        paper_lab_enabled=True,
+        paper_lab_usd="5000",
+        paper_lab_usdt="500",
+        market_source="toss",
+        upbit_enabled=True,
+    )
 
 
 def update(data, *, date=None, edited=None, sender=7):
@@ -48,11 +61,113 @@ async def setup(db):
     return bot, row
 
 
+async def setup_paper(db):
+    database, sessions = db
+    config = paper_settings()
+    bot = TelegramBot(config, sessions, database)
+    bot.send = AsyncMock()
+    bot.call = AsyncMock()
+    at = datetime.now(UTC)
+    async with sessions.begin() as session:
+        await bootstrap_lab(session, config, at)
+        await session.flush()
+        row = await session.get(PaperPortfolio, "toss-base-v1")
+        row.state = {
+            **row.state,
+            "action": "WAIT",
+            "reason": "미국 정규장 시작 대기",
+            "signal_date": "2026-09-05",
+            "nav_at": at.isoformat(),
+            "next_check_at": (at + timedelta(hours=1)).isoformat(),
+            "history_fingerprint": "a" * 64,
+            "conditions": {
+                "SPY": {
+                    "value": "650",
+                    "average": "625",
+                    "enter_pass": True,
+                    "exit_pass": False,
+                    "target": "0.142857",
+                }
+            },
+        }
+        session.add(RuntimeState(key="paper_lab", data={"enabled": True, "checked_at": at.isoformat()}))
+    return bot
+
+
 def start_button(row, bot):
     _, buttons = view.strategy(row, bot.settings)
     return next(
         b["callback_data"] for r in buttons for b in r if b.get("callback_data", "").startswith("run:")
     )
+
+
+def text_update(text, update_id=100):
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 42,
+            "date": int(time.time()),
+            "from": {"id": 7},
+            "chat": {"id": 7, "type": "private"},
+            "text": text,
+        },
+    }
+
+
+def test_paper_profile_commands_remove_ambiguous_live_controls():
+    names = {name for name, _ in view.commands(True)}
+    assert {"paper", "paper_data", "pocket", "toss"} <= names
+    assert names.isdisjoint({"orders", "profit", "strategies", "status", "pause"})
+    assert {name for name, _ in view.commands(False)} == {name for name, _ in view.LIVE_COMMANDS}
+
+
+async def test_paper_profile_exposes_separate_summary_and_signal_evidence(db):
+    bot = await setup_paper(db)
+    await bot.handle(text_update("/paper"))
+    rendered = str(bot.send.call_args.args[0])
+    assert "모의 비교 운용 · 실제 주문 없음" in rendered
+    assert "기준 추세" in rendered and "미국 ETF" in rendered
+    assert "실제 계좌 잔고·실거래 원장" not in rendered
+
+    await bot.handle(text_update("/paper_data", 101))
+    rendered = str(bot.send.call_args.args[0])
+    assert "paper_portfolios와 paper_events만 읽습니다" in rendered
+    assert "신호값" in rendered and "650" in rendered and "625" in rendered
+    assert "진입 통과" in rendered and "이탈 미통과" in rendered
+    assert "미국 정규장 시작 대기" in rendered and "다음 평가" in rendered
+
+    await bot.handle(text_update("/pocket", 102))
+    rendered = str(bot.send.call_args.args[0])
+    buttons = str(bot.send.call_args.args[1])
+    assert "실제 계좌의 마지막 조회 값입니다. 모의 원장과 합산하지 않습니다" in rendered
+    assert "미체결 주문" not in buttons and "전략 관리" not in buttons
+    await bot.client.aclose()
+
+
+async def test_paper_profile_rejects_old_live_commands_and_callbacks_without_database_writes(db):
+    bot = await setup_paper(db)
+    for index, command in enumerate(("/profit", "/strategies", "/orders", "/status", "/pause"), 1):
+        await bot.handle(text_update(command, index))
+        assert "실거래 전략·주문·중단 명령은 접수하지 않았습니다" in str(bot.send.call_args.args[0])
+    await bot.handle(update("run:00000000000000000000000000000000:1:stale"))
+    assert "실거래 전략·주문·중단 명령은 접수하지 않았습니다" in str(bot.send.call_args.args[0])
+    async with bot.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Command)) == 0
+    await bot.client.aclose()
+
+
+async def test_paper_profile_health_alert_uses_paper_runtime(db):
+    bot = await setup_paper(db)
+    async with bot.sessions.begin() as session:
+        runtime = await session.get(RuntimeState, "paper_lab")
+        runtime.updated_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=3)
+    await bot.notifications()
+    async with bot.sessions() as session:
+        event = await session.scalar(select(Event).where(Event.kind == "health"))
+        alert = await session.get(RuntimeState, "telegram_paper_lab_alert")
+    assert "모의 실행기 갱신" in event.message
+    assert alert.data == {"stale": True}
+    await bot.client.aclose()
 
 
 async def test_rich_account_uses_engine_pocket_snapshot_and_no_financial_commands(db):
