@@ -447,10 +447,6 @@ def make_reactivation_plan(snapshot, ledger, db_identity, evidence):
     """Move only the asset and settlement currency needed by one retired strategy."""
     no_pending(snapshot)
     require(
-        not any(totals(snapshot, "target").values()),
-        "재개 이전에는 코트레이더 포켓이 비어 있어야 합니다",
-    )
-    require(
         evidence.get("venue") == "upbit_usdt" and evidence.get("mode") == "live",
         "USDT 실거래 전략만 재개할 수 있습니다",
     )
@@ -483,6 +479,11 @@ def make_reactivation_plan(snapshot, ledger, db_identity, evidence):
         "종료 시 해제한 수량이 원본 전략 수량과 다릅니다",
     )
     selected = sorted({asset, settlement})
+    target_balances = totals(snapshot, "target")
+    require(
+        all(target_balances.get(code, Decimal(0)) == 0 for code in selected),
+        "재개할 종목과 USDT의 코트레이더 포켓 기존 잔고가 없어야 합니다",
+    )
     require(
         all(balances.get(code, Decimal(0)) > 0 for code in selected), "재개에 필요한 자산 잔고가 없습니다"
     )
