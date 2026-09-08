@@ -20,6 +20,7 @@ from cotrader.pockets import (
     env_values,
     ledger_evidence,
     make_plan,
+    make_reactivation_plan,
     make_return_plan,
     migrate,
     number,
@@ -265,6 +266,98 @@ def test_return_rejects_changed_direction_and_excluded_amount():
     p["items"].append({"currency": "APENFT", "amount": "0.00000013", "identifier": "tampered"})
     with pytest.raises(MigrationError):
         validate_plan(p)
+
+
+def reactivation_snapshot():
+    value = snapshot()
+    value["balances"]["main"] = {
+        "BTC": {"balance": "2.25", "locked": "0"},
+        "KRW": {"balance": "0.123456789", "locked": "0"},
+        "SOL": {"balance": "3.41538512", "locked": "0"},
+        "USDT": {"balance": "92.06582867", "locked": "0"},
+    }
+    return value
+
+
+def reactivation_fixture():
+    source = {
+        "funded": True,
+        "cash": "90.635782622",
+        "quantity": "3.41538512",
+        "cost_basis": "500",
+        "realized": "0",
+        "costs": "0",
+        "lots": {},
+        "last_mid": None,
+        "last_bar": None,
+    }
+    plan_hash = "a" * 64
+    evidence = {
+        "strategy_id": "sol-strategy",
+        "venue": "upbit_usdt",
+        "mode": "live",
+        "symbol": "USDT-SOL",
+        "retirement_event_id": "retirement-event",
+        "retirement_plan_sha256": plan_hash,
+        "source_state": source,
+    }
+    ledger = [
+        {
+            "id": "sol-strategy",
+            "symbol": "USDT-SOL",
+            "status": "ARCHIVED",
+            "version": 4,
+            "config": {"budget": "600"},
+            "state": {
+                **source,
+                "funded": False,
+                "settled": True,
+                "quantity": "0",
+                "released_quantity": source["quantity"],
+                "retirement_plan_sha256": plan_hash,
+            },
+        }
+    ]
+    return ledger, evidence
+
+
+def test_reactivation_plan_moves_only_sol_and_usdt_and_preserves_main_assets():
+    ledger, evidence = reactivation_fixture()
+    plan = make_reactivation_plan(reactivation_snapshot(), ledger, {}, evidence)
+    validate_plan(plan)
+    assert {item["currency"]: item["amount"] for item in plan["items"]} == {
+        "SOL": "3.41538512",
+        "USDT": "92.06582867",
+    }
+    assert plan["reserve_btc"] == "2.25"
+    assert "BTC" not in {item["currency"] for item in plan["items"]}
+    assert "KRW" not in {item["currency"] for item in plan["items"]}
+    assert transfer_body(plan, plan["items"][0])["from"] == MAIN
+
+
+@pytest.mark.parametrize("change", ["asset", "cash", "target", "released", "items", "direction"])
+def test_reactivation_plan_rejects_mismatch_or_tampering(change):
+    value = reactivation_snapshot()
+    ledger, evidence = reactivation_fixture()
+    if change == "asset":
+        value["balances"]["main"]["SOL"]["balance"] = "3"
+    elif change == "cash":
+        value["balances"]["main"]["USDT"]["balance"] = "80"
+    elif change == "target":
+        value["balances"]["target"]["USDT"] = {"balance": "1", "locked": "0"}
+    elif change == "released":
+        ledger[0]["state"]["released_quantity"] = "3"
+    else:
+        plan = make_reactivation_plan(value, ledger, {}, evidence)
+        if change == "items":
+            plan["items"][0]["amount"] = "1"
+        else:
+            plan["direction"] = "to-main"
+        with pytest.raises(MigrationError):
+            validate_plan(plan)
+        return
+    with pytest.raises(MigrationError):
+        make_reactivation_plan(value, ledger, {}, evidence)
 
 
 async def test_processing_receipt_blocks_remaining_assets_until_done(tmp_path):

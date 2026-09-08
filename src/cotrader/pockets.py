@@ -25,7 +25,7 @@ from cotrader.config import Settings
 from cotrader.db import SingleWriter, database
 from cotrader.domain import ACTIVE_ORDERS
 from cotrader.markets import UPBIT_VENUES
-from cotrader.models import Command, Intent, Strategy
+from cotrader.models import Command, Event, Intent, Strategy
 from cotrader.upbit import account_jwt
 
 TRANSFER = "/v1/pockets/universal_transfers"
@@ -315,6 +315,48 @@ async def ledger_evidence(sessions):
         ]
 
 
+async def reactivation_evidence(sessions, strategy_id):
+    """Bind a selective transfer to one previously retired live USDT strategy."""
+    async with sessions() as session:
+        strategy = await session.get(Strategy, strategy_id)
+        require(
+            strategy
+            and strategy.mode == "live"
+            and strategy.venue == "upbit_usdt"
+            and strategy.status == "ARCHIVED",
+            "재개 대상은 운용 종료된 업비트 USDT 실거래 전략이어야 합니다",
+        )
+        plan_hash = strategy.state.get("retirement_plan_sha256")
+        require(
+            isinstance(plan_hash, str) and re.fullmatch(r"[0-9a-f]{64}", plan_hash),
+            "종료 계획 이력이 없습니다",
+        )
+        event = await session.scalar(
+            select(Event)
+            .where(Event.kind == "retirement", Event.strategy_id == strategy.id)
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(1)
+        )
+        require(event and event.data.get("plan_sha256") == plan_hash, "종료 이벤트와 전략 장부가 다릅니다")
+        source_state = event.data.get("source_state")
+        require(
+            isinstance(source_state, dict) and event.data.get("actual_order_created") is False,
+            "종료 원본 상태가 없습니다",
+        )
+        require(source_state.get("funded") is True, "종료 전 자금 배정 상태가 아닙니다")
+        require(number(source_state.get("quantity")) > 0, "재개할 보유 자산 수량이 없습니다")
+        number(source_state.get("cash"))
+        return {
+            "strategy_id": strategy.id,
+            "venue": strategy.venue,
+            "mode": strategy.mode,
+            "symbol": strategy.symbol,
+            "retirement_event_id": event.id,
+            "retirement_plan_sha256": plan_hash,
+            "source_state": source_state,
+        }
+
+
 def quantities_covered(ledger, snapshot, reserve_btc):
     moving = totals(snapshot, "main")
     moving["BTC"] = moving.get("BTC", Decimal(0)) - reserve_btc
@@ -401,14 +443,88 @@ def make_return_plan(snapshot, ledger, db_identity, excluded=()):
     }
 
 
+def make_reactivation_plan(snapshot, ledger, db_identity, evidence):
+    """Move only the asset and settlement currency needed by one retired strategy."""
+    no_pending(snapshot)
+    require(
+        not any(totals(snapshot, "target").values()),
+        "재개 이전에는 코트레이더 포켓이 비어 있어야 합니다",
+    )
+    require(
+        evidence.get("venue") == "upbit_usdt" and evidence.get("mode") == "live",
+        "USDT 실거래 전략만 재개할 수 있습니다",
+    )
+    matches = [row for row in ledger if row["id"] == evidence.get("strategy_id")]
+    require(len(matches) == 1 and matches[0]["status"] == "ARCHIVED", "재개 대상 전략 장부가 다릅니다")
+    row = matches[0]
+    require(row["symbol"] == evidence.get("symbol"), "재개 대상 종목이 다릅니다")
+    require(
+        row["state"].get("retirement_plan_sha256") == evidence.get("retirement_plan_sha256"),
+        "종료 계획 해시가 다릅니다",
+    )
+    source_state = evidence.get("source_state")
+    require(
+        isinstance(source_state, dict) and source_state.get("funded") is True,
+        "종료 전 원본 상태가 다릅니다",
+    )
+    settlement, asset = row["symbol"].split("-", 1)
+    require(settlement == "USDT" and re.fullmatch(r"[A-Z0-9]{1,20}", asset), "지원하지 않는 재개 종목입니다")
+    balances = totals(snapshot, "main")
+    require(
+        balances.get(asset, Decimal(0)) == number(source_state.get("quantity")),
+        "메인 보유 자산이 종료 전 전략 수량과 다릅니다",
+    )
+    require(
+        balances.get(settlement, Decimal(0)) >= number(source_state.get("cash")),
+        "메인 USDT가 종료 전 전략 현금보다 적습니다",
+    )
+    require(
+        number(row["state"].get("released_quantity")) == number(source_state.get("quantity")),
+        "종료 시 해제한 수량이 원본 전략 수량과 다릅니다",
+    )
+    selected = sorted({asset, settlement})
+    require(
+        all(balances.get(code, Decimal(0)) > 0 for code in selected), "재개에 필요한 자산 잔고가 없습니다"
+    )
+    plan_id = str(uuid4())
+    items = [
+        {
+            "currency": code,
+            "amount": decimal_text(balances[code]),
+            "identifier": f"ct-{plan_id}-{code}",
+        }
+        for code in selected
+    ]
+    return {
+        "schema": 3,
+        "direction": "to-sub",
+        "selected": selected,
+        "reactivation": evidence,
+        "id": plan_id,
+        "created_at": datetime.now(UTC).isoformat(),
+        "reserve_btc": decimal_text(balances.get("BTC", Decimal(0))),
+        "snapshot": snapshot,
+        "ledger": ledger,
+        "database": db_identity,
+        "items": items,
+    }
+
+
 def validate_plan(plan):
-    require(plan["schema"] in {1, 2}, "지원하지 않는 이전 계획입니다")
+    require(plan["schema"] in {1, 2, 3}, "지원하지 않는 이전 계획입니다")
     require(str(UUID(plan["id"])) == plan["id"], "계획 ID 형식 오류")
     created = datetime.fromisoformat(plan["created_at"])
     require(created.tzinfo is not None and created <= datetime.now(UTC), "계획 생성 시각 오류")
     if plan["schema"] == 2:
         require(plan.get("direction") == "to-main", "반환 계획의 방향이 다릅니다")
         regenerated = make_return_plan(plan["snapshot"], plan["ledger"], plan["database"], plan["excluded"])
+        require(plan["reserve_btc"] == regenerated["reserve_btc"], "메인 BTC 원본 잔고가 다릅니다")
+    elif plan["schema"] == 3:
+        require(plan.get("direction") == "to-sub", "재개 계획의 방향이 다릅니다")
+        regenerated = make_reactivation_plan(
+            plan["snapshot"], plan["ledger"], plan["database"], plan["reactivation"]
+        )
+        require(plan.get("selected") == regenerated["selected"], "재개 대상 자산이 다릅니다")
         require(plan["reserve_btc"] == regenerated["reserve_btc"], "메인 BTC 원본 잔고가 다릅니다")
     else:
         regenerated = make_plan(plan["snapshot"], plan["ledger"], plan["database"], plan["reserve_btc"])
@@ -581,7 +697,20 @@ async def run(args):
                 snapshot = await client.snapshot()
                 await lock.verify()
                 require(ledger == await ledger_evidence(sessions), "조회 도중 장부가 바뀌었습니다")
-                if args.direction == "to-main":
+                if args.reactivate_strategy_id:
+                    require(args.direction == "to-sub", "전략 재개 계획은 코트레이더 포켓 방향이어야 합니다")
+                    require(
+                        args.reserve_btc is None and not args.exclude_currency,
+                        "전략 재개 계획은 자산을 자동 선택합니다",
+                    )
+                    evidence = await reactivation_evidence(sessions, args.reactivate_strategy_id)
+                    await lock.verify()
+                    require(
+                        evidence == await reactivation_evidence(sessions, args.reactivate_strategy_id),
+                        "조회 도중 종료 이력이 바뀌었습니다",
+                    )
+                    plan = make_reactivation_plan(snapshot, ledger, db_identity, evidence)
+                elif args.direction == "to-main":
                     require(args.reserve_btc is None, "반환에는 --reserve-btc를 지정하지 않습니다")
                     plan = make_return_plan(snapshot, ledger, db_identity, args.exclude_currency)
                 else:
@@ -605,11 +734,20 @@ async def run(args):
                 require(
                     plan["ledger"] == await ledger_evidence(sessions), "전략 설정·보유 장부가 계획과 다릅니다"
                 )
+                if plan["schema"] == 3:
+                    require(
+                        plan["reactivation"]
+                        == await reactivation_evidence(sessions, plan["reactivation"]["strategy_id"]),
+                        "종료 이벤트 원본과 재개 계획이 다릅니다",
+                    )
 
             await check_ledger()
             if args.action == "retire":
                 require(plan["schema"] == 2, "메인포켓 반환 후에만 운용 종료할 수 있습니다")
                 require(args.confirm == digest(plan), "검토한 반환 계획의 SHA256이 필요합니다")
+            if args.action == "reactivate":
+                require(plan["schema"] == 3, "선택 재개 계획으로만 전략을 복원할 수 있습니다")
+                require(args.confirm == digest(plan), "검토한 재개 계획의 SHA256이 필요합니다")
             if args.action == "apply":
                 require(args.confirm == digest(plan), "검토한 계획의 SHA256을 --confirm에 입력하세요")
                 with Journal(str(args.plan) + ".journal", plan) as journal:
@@ -625,7 +763,7 @@ async def run(args):
                     "메인의 BTC가 계획한 보존 수량과 다릅니다",
                 )
             if args.action == "verify" and args.engine_env:
-                require(plan["schema"] == 1, "반환 후에는 실거래 엔진 키 파일을 생성하지 않습니다")
+                require(plan["schema"] in {1, 3}, "반환 후에는 실거래 엔진 키 파일을 생성하지 않습니다")
                 private_write(args.engine_env, engine_env(values))
             if args.action == "retire":
                 from cotrader.retirement import retire_returned
@@ -641,6 +779,17 @@ async def run(args):
                     print(json.dumps({"retired": retired, "actual_order_created": False}, ensure_ascii=False))
                 finally:
                     await market.close()
+            if args.action == "reactivate":
+                from cotrader.retirement import reactivate_returned
+
+                await lock.verify()
+                async with sessions.begin() as session:
+                    reactivated = await reactivate_returned(session, plan, datetime.now(UTC))
+                print(
+                    json.dumps(
+                        {"reactivated": reactivated, "actual_order_created": False}, ensure_ascii=False
+                    )
+                )
             print(
                 json.dumps(
                     {
@@ -663,7 +812,7 @@ def main():
     parser.add_argument("--key-file", default="~/.config/upbit/upbit-api-key.env")
     actions = parser.add_subparsers(dest="action", required=True)
     actions.add_parser("inspect", help="포켓·잔고·주문 조회만 수행")
-    for action in ("plan", "apply", "verify", "retire"):
+    for action in ("plan", "apply", "verify", "retire", "reactivate"):
         sub = actions.add_parser(action)
         sub.add_argument("--database-env-file", required=True)
         sub.add_argument("--expected-database", required=True)
@@ -673,10 +822,11 @@ def main():
             sub.add_argument("--direction", choices=["to-sub", "to-main"], default="to-sub")
             sub.add_argument("--reserve-btc")
             sub.add_argument("--exclude-currency", action="append", default=[])
+            sub.add_argument("--reactivate-strategy-id")
             sub.add_argument("--output", type=Path, required=True)
         else:
             sub.add_argument("--plan", type=Path, required=True)
-            if action in {"apply", "retire"}:
+            if action in {"apply", "retire", "reactivate"}:
                 sub.add_argument("--confirm", required=True, help="계획 생성 시 출력된 SHA256")
         if action == "verify":
             sub.add_argument("--engine-env", type=Path, help="검증 후 코트레이더 키를 새 600 파일로 저장")

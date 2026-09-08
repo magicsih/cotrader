@@ -4,7 +4,7 @@
 
 **주문은 복제하지 않는다.** 기존 봇에서 전략 중단과 주문 대조를 완료한 뒤 포켓을 전환하고 같은 전략을 재개한다. 주문을 별도로 복제하면 기존 주문 ID와 장부가 달라지고 중복 주문·보유 불일치가 발생할 수 있다.
 
-이 도구는 운영자가 직접 실행한다. `inspect`, `plan`, `verify`는 업비트에 GET만 보낸다. `apply`만 포켓 자산 이전 POST를 보낸다. 주문 생성·취소·출금·DB 장부 수정·엔진 시작 기능은 없다. `verify --engine-env`는 검증 성공 후에만 로컬 키 파일을 새로 만든다.
+이 도구는 운영자가 직접 실행한다. `inspect`, `plan`, `verify`, `reactivate`는 업비트에 GET만 보낸다. `apply`만 포켓 자산 이전 POST를 보낸다. 주문 생성·취소·출금 기능은 없다. `reactivate`는 이전 완료를 다시 검증한 뒤 운용 종료된 전략 하나를 `PAUSED`로 복원하지만 주문을 만들거나 위험 기준점을 바꾸지 않는다. `verify --engine-env`는 검증 성공 후에만 로컬 키 파일을 새로 만든다.
 
 ## 준비
 
@@ -52,6 +52,26 @@ uv run python -m cotrader.pockets plan \
 - 소액 KRW와 미세 잔고도 버리거나 반올림하지 않는다. 지원 여부는 실제 API 처리 결과로 판단하며, 거절된 자산을 임의로 제외하지 않는다.
 - 기존 파일을 덮어쓰지 않는다. 실행 도중인 계획과 `.journal`은 삭제하거나 편집하지 않는다.
 
+### 운용 종료된 전략 하나만 선택 재개
+
+메인 포켓으로 원상 반환했던 USDT 전략 하나를 재개할 때는 전략 ID를 지정한다. 이 모드는 전략 종목의 보유 자산과 결제 자산 USDT만 자동 선택하며 `--reserve-btc`나 `--exclude-currency`를 받지 않는다.
+
+```bash
+uv run python -m cotrader.pockets plan \
+  --key-file "$POCKET_OPERATOR_KEY_FILE" \
+  --database-env-file "$POCKET_DATABASE_ENV" \
+  --expected-database "$POCKET_DATABASE_NAME" \
+  --reactivate-strategy-id "$POCKET_STRATEGY_ID" \
+  --output private/reactivation-plan.json
+```
+
+계획 생성은 다음 조건을 모두 확인한다.
+
+- 대상은 `ARCHIVED`인 업비트 USDT 실거래 전략 하나이며, 종료 이벤트의 원본 상태와 해시가 현재 장부와 일치한다.
+- 코트레이더 포켓은 비어 있고 양쪽 포켓의 주문과 잠긴 잔고가 없다.
+- 메인의 종목 수량은 종료 직전 전략 수량과 정확히 같고, USDT는 종료 직전 전략 현금 이상이다.
+- 계획의 `items`는 해당 종목과 USDT 두 자산뿐이다. 메인 BTC·KRW 및 다른 자산은 이전하지 않는다.
+
 ## 운영자가 이전 실행
 
 **다음 명령은 실제 자산을 이전한다.** 계획의 포켓·수량을 검토한 뒤 그 계획의 SHA256을 직접 전달한다. 실행 때 장부와 잔고가 달라졌다면 이전하지 않는다.
@@ -87,6 +107,19 @@ uv run python -m cotrader.pockets verify \
 출력한 env 파일은 600 권한이며, 기존 엔진이 읽는 `UPBIT_OPEN_API_ACCESS_KEY`, `UPBIT_OPEN_API_SECRET_KEY` 이름에 **코트레이더 포켓 키만** 담는다. 파일 내용은 터미널에 출력하지 않는다. 관리자·메인 키와 원본 파일·카탈로그는 수정하지 않는다. Kubernetes Secret 갱신은 등록된 자격증명 백업·복원 검사와 기존 consumer 확인 후 운영자가 수행한다.
 
 ## 기존 전략 재개
+
+선택 재개 계획에서는 이전과 키 검증을 완료한 후 같은 계획 해시로 장부 상태를 복원한다.
+
+```bash
+uv run python -m cotrader.pockets reactivate \
+  --key-file "$POCKET_OPERATOR_KEY_FILE" \
+  --database-env-file "$POCKET_DATABASE_ENV" \
+  --expected-database "$POCKET_DATABASE_NAME" \
+  --plan private/reactivation-plan.json \
+  --confirm 검토한_계획의_SHA256
+```
+
+`reactivate`는 종료 이벤트에 저장된 동일 전략 상태를 복원하고 `PAUSED`로 둔다. 계좌의 `daily_anchor`와 `high_water`는 변경하지 않는다. 계좌가 기존 평가금액 하락 중단 상태가 아니거나 다른 업비트 실거래 전략에 자금이 배정되어 있으면 중단한다. 이후 자동 복구는 최신 평가가 설정 한도의 안전 구간에 60초 이상 머물고 계좌·주문·수수료·호가·시험 주문 점검을 통과할 때만 이 전략을 `RUNNING`으로 바꾼다.
 
 1. 엔진의 키 주입 위치를 코트레이더 키로 갱신하고, 저장한 실행 사본이 원본 코트레이더 키와 일치하는지 값을 출력하지 않고 대조한다. 기존 이미지·전략·장부·위험 기준을 유지한다. 이 도구를 엔진 이미지에 배포할 필요는 없다.
 2. 엔진을 다시 시작한다. 기존 업비트 전략은 PAUSED 상태로 남는다. 실제 계좌 조회가 새 포켓을 표시하고, 자산 수량이 이전 검증 결과와 일치하는지 확인한다.
