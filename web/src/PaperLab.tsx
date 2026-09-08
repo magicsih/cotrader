@@ -16,7 +16,7 @@ export function PaperLab({ api }: { api: (path: string) => Promise<any> }) {
     let stopped = false;
     const refresh = async () => {
       try {
-        const next = await api("/api/paper-lab");
+        const next = await api("/paper-lab");
         if (!stopped) {
           setData(next);
           setError("");

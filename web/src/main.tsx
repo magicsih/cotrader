@@ -529,35 +529,39 @@ function App({
       </aside>
       <main>
         <header className="topbar">
-          <label className="market-picker">
-            시장
-            <select
-              aria-label="시장 선택"
-              value={venue}
-              onChange={(e) => onVenue(e.target.value as Venue)}
-            >
-              <option value="toss">토스 미국 주식 · USD</option>
-              <option value="upbit">업비트 코인 · KRW</option>
-              <option value="upbit_usdt">업비트 코인 · USDT</option>
-            </select>
-          </label>
+          {tab !== "paper" && (
+            <label className="market-picker">
+              시장
+              <select
+                aria-label="시장 선택"
+                value={venue}
+                onChange={(e) => onVenue(e.target.value as Venue)}
+              >
+                <option value="toss">토스 미국 주식 · USD</option>
+                <option value="upbit">업비트 코인 · KRW</option>
+                <option value="upbit_usdt">업비트 코인 · USDT</option>
+              </select>
+            </label>
+          )}
           <span className="breadcrumb">
             내 트레이딩 데스크 <span>/</span> {titles[tab]}
           </span>
-          <div className="mode-switch">
-            <button
-              className={mode === "paper" ? "selected" : ""}
-              onClick={() => setMode("paper")}
-            >
-              모의매매
-            </button>
-            <button
-              className={mode === "live" ? "selected live" : ""}
-              onClick={() => setMode("live")}
-            >
-              실거래
-            </button>
-          </div>
+          {tab !== "paper" && (
+            <div className="mode-switch">
+              <button
+                className={mode === "paper" ? "selected" : ""}
+                onClick={() => setMode("paper")}
+              >
+                모의매매
+              </button>
+              <button
+                className={mode === "live" ? "selected live" : ""}
+                onClick={() => setMode("live")}
+              >
+                실거래
+              </button>
+            </div>
+          )}
           {authMode !== "local" && (
             <button
               className="text-button"
@@ -579,14 +583,14 @@ function App({
               <div className="eyebrow">
                 {tab === "start"
                   ? "PAPER RESEARCH"
-                  : mode === "paper"
+                  : tab === "paper" || mode === "paper"
                     ? "PAPER TRADING"
                     : "LIVE TRADING"}
               </div>
               <h1>{titles[tab]}</h1>
               <p>{subtitles[tab]}</p>
             </div>
-            {tab !== "start" && (
+            {tab !== "start" && tab !== "paper" && (
               <button
                 className="primary"
                 onClick={() => setShowForm(true)}
@@ -597,7 +601,7 @@ function App({
               </button>
             )}
           </div>
-          {tab !== "start" && (
+          {tab !== "start" && tab !== "paper" && (
             <div className="getting-started">
               <div>
                 <strong>처음 시작하시나요?</strong>
@@ -640,7 +644,7 @@ function App({
               onAdvanced={() => setTab("research")}
             />
           )}
-          {isCrypto(venue) && (
+          {tab !== "paper" && isCrypto(venue) && (
             <div className="banner">
               업비트 {currency} 마켓 ·{" "}
               {status.live_enabled
@@ -648,29 +652,30 @@ function App({
                 : "실거래 잠금. 연구·모의매매·계좌 조회를 사용할 수 있습니다."}
             </div>
           )}
-          {(status.market_source === "offline" || !connected) && (
-            <div className="connection-banner">
-              <span className="connection-icon">⌁</span>
-              <div>
-                <strong>
-                  {status.market_source === "offline"
-                    ? "시세 연결 전 · 주문은 실행되지 않습니다"
-                    : "실행기 상태를 확인해주세요"}
-                </strong>
-                <p>
-                  전략 설정과 가져온 데이터의 백테스트를 사용할 수 있습니다.
-                  모의 포트폴리오 값은 실제 계좌 잔고와 별도입니다.
-                </p>
+          {tab !== "paper" &&
+            (status.market_source === "offline" || !connected) && (
+              <div className="connection-banner">
+                <span className="connection-icon">⌁</span>
+                <div>
+                  <strong>
+                    {status.market_source === "offline"
+                      ? "시세 연결 전 · 주문은 실행되지 않습니다"
+                      : "실행기 상태를 확인해주세요"}
+                  </strong>
+                  <p>
+                    전략 설정과 가져온 데이터의 백테스트를 사용할 수 있습니다.
+                    모의 포트폴리오 값은 실제 계좌 잔고와 별도입니다.
+                  </p>
+                </div>
+                <span className="badge neutral">
+                  {mode === "paper"
+                    ? "모의 환경"
+                    : status.live_enabled
+                      ? "실거래 허용"
+                      : "실거래 잠금"}
+                </span>
               </div>
-              <span className="badge neutral">
-                {mode === "paper"
-                  ? "모의 환경"
-                  : status.live_enabled
-                    ? "실거래 허용"
-                    : "실거래 잠금"}
-              </span>
-            </div>
-          )}
+            )}
           {tab === "overview" && (
             <>
               <ProfitPanel report={profit} />
@@ -1322,18 +1327,20 @@ function App({
               </div>
             </>
           )}
-          {Number(portfolio?.released_value) > 0 && (
+          {tab !== "paper" && Number(portfolio?.released_value) > 0 && (
             <p className="banner">
               총 평가에는 종료 전략에서 인계한 보유분의 당시 평가액{" "}
               {money(portfolio?.released_value)}이 포함됩니다. 사용 가능한
               현금이 아니며 인계 이후 변동은 새 전략에 기록됩니다.
             </p>
           )}
-          <footer>
-            봇 운용 금액은 {currency} 기준입니다. 시장별 예산·손익은 별도로
-            계산합니다.{" "}
-            <span>수수료·세금의 확정 여부는 주문 기록에서 확인하세요.</span>
-          </footer>
+          {tab !== "paper" && (
+            <footer>
+              봇 운용 금액은 {currency} 기준입니다. 시장별 예산·손익은 별도로
+              계산합니다.{" "}
+              <span>수수료·세금의 확정 여부는 주문 기록에서 확인하세요.</span>
+            </footer>
+          )}
         </div>
       </main>
       {cautionStrategy && (
