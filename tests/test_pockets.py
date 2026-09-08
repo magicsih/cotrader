@@ -276,6 +276,7 @@ def reactivation_snapshot():
         "SOL": {"balance": "3.41538512", "locked": "0"},
         "USDT": {"balance": "92.06582867", "locked": "0"},
     }
+    value["balances"]["target"] = {"APENFT": {"balance": "0.00000013", "locked": "0"}}
     return value
 
 
@@ -321,7 +322,7 @@ def reactivation_fixture():
     return ledger, evidence
 
 
-def test_reactivation_plan_moves_only_sol_and_usdt_and_preserves_main_assets():
+def test_reactivation_plan_moves_only_sol_and_usdt_and_preserves_unrelated_assets():
     ledger, evidence = reactivation_fixture()
     plan = make_reactivation_plan(reactivation_snapshot(), ledger, {}, evidence)
     validate_plan(plan)
@@ -332,6 +333,8 @@ def test_reactivation_plan_moves_only_sol_and_usdt_and_preserves_main_assets():
     assert plan["reserve_btc"] == "2.25"
     assert "BTC" not in {item["currency"] for item in plan["items"]}
     assert "KRW" not in {item["currency"] for item in plan["items"]}
+    assert "APENFT" not in {item["currency"] for item in plan["items"]}
+    assert plan["snapshot"]["balances"]["target"]["APENFT"]["balance"] == "0.00000013"
     assert transfer_body(plan, plan["items"][0])["from"] == MAIN
 
 
