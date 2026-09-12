@@ -64,7 +64,7 @@ func Fresh(t *testing.T) *store.DB {
 	if err != nil {
 		t.Fatalf("연결 실패: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("마이그레이션 실패: %v", err)
 	}

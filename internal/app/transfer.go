@@ -138,20 +138,15 @@ func typeKey(typed, key string) string {
 
 // drawTransfer shows whichever step the transfer is on.
 func (a *App) drawTransfer(ctx context.Context, messageID int64, draft transferDraft) error {
-	switch {
-	case draft.Currency == "":
-		s, err := a.transferCurrencyScreen(ctx, draft)
-		if err != nil {
-			return a.show(ctx, messageID, a.errorScreen(err))
-		}
-		return a.show(ctx, messageID, s)
-	default:
-		s, err := a.transferAmountScreen(ctx, draft)
-		if err != nil {
-			return a.show(ctx, messageID, a.errorScreen(err))
-		}
-		return a.show(ctx, messageID, s)
+	build := a.transferAmountScreen
+	if draft.Currency == "" {
+		build = a.transferCurrencyScreen
 	}
+	s, err := build(ctx, draft)
+	if err != nil {
+		return a.show(ctx, messageID, a.errorScreen(err))
+	}
+	return a.show(ctx, messageID, s)
 }
 
 // source is the pocket a transfer draws from, which is what limits it.

@@ -378,16 +378,16 @@ func TestSnapshotRefusesToGuessBetweenAccounts(t *testing.T) {
 
 func TestSnapshotMasksTheAccountNumber(t *testing.T) {
 	client := newClient(t, settings(false), &stub{handler: func(w http.ResponseWriter, r *http.Request, _ string) {
-		switch {
-		case r.URL.Path == "/api/v1/accounts":
+		switch r.URL.Path {
+		case "/api/v1/accounts":
 			ok(w, []Account{{AccountSeq: "seq-1", AccountNo: "12345678", AccountType: "BROKERAGE"}})
-		case r.URL.Path == "/api/v1/buying-power":
+		case "/api/v1/buying-power":
 			ok(w, map[string]string{"cashBuyingPower": "5500.25"})
-		case r.URL.Path == "/api/v1/holdings":
+		case "/api/v1/holdings":
 			ok(w, []map[string]any{{"symbol": "QQQ", "quantity": "10", "currency": "USD"}})
-		case r.URL.Path == "/api/v1/orders":
+		case "/api/v1/orders":
 			ok(w, map[string]any{"orders": []any{}})
-		case r.URL.Path == "/api/v1/commissions":
+		case "/api/v1/commissions":
 			ok(w, []map[string]string{{"marketCountry": "US", "commissionRate": "0.001"}})
 		default:
 			t.Errorf("예상하지 못한 경로 %s", r.URL.Path)

@@ -1,0 +1,23 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    # Order state is a string enum, so a switch that forgets a case would
+    # silently treat that state as terminal and stop reconciling it.
+    - exhaustive
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    errcheck:
+      # Closing a reader or rolling back an already-committed transaction can
+      # fail only in ways nothing can act on, and the deferred call is there
+      # to release the handle rather than to report anything.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.DB).Close
+        - (*database/sql.Conn).Close
+formatters:
+  enable:
+    - gofmt

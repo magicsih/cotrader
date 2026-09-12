@@ -46,7 +46,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// The lock is taken before anything else runs: two bots on one account
 	// would place every ladder twice.

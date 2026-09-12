@@ -9,39 +9,53 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+env:
+  # The toolchain is named in go.mod and fetched through the checksum-verified
+  # module proxy, so no separate setup action is pinned here.
+  GOTOOLCHAIN: auto
+  GOLANGCI_LINT_VERSION: v2.13.2
 jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:9.2.0
+        env:
+          MYSQL_ROOT_PASSWORD: isolated-test-root
+          MYSQL_DATABASE: cotrader_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pisolated-test-root"
+          --health-interval=5s --health-timeout=5s --health-retries=30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: '0.12.10'
-          enable-cache: false
-      - run: uv sync --frozen
-      - run: uv run ruff check src tests migrations scripts/check-public.py
-      - run: uv run ruff format --check src tests migrations scripts/check-public.py
-      - run: python3 scripts/check-public.py
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            echo "gofmt이 필요한 파일:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - run: go vet ./...
+      - name: Lint
+        run: |
+          set -euo pipefail
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+      - name: Tests
+        env:
+          # Each test package creates its own schema, so the account needs
+          # rights to create databases.
+          COTRADER_TEST_DSN: root:isolated-test-root@tcp(127.0.0.1:3306)/cotrader_test
+        run: go test -race ./...
       - name: Scan public Git history for credentials
         run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.30.1 git /repo --redact --no-banner
-      - name: MySQL integration tests
-        run: bash scripts/test-mysql.sh -q
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: '11.3.0'
-          run_install: false
-      - run: pnpm --dir web install --frozen-lockfile
-      - run: pnpm --dir web build
   image:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -49,9 +63,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-        with:
-          platforms: arm64
+      # No QEMU: the build stage runs on the native architecture and Go cross
+      # compiles, so both images are built without emulation.
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -74,9 +87,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-        with:
-          platforms: arm64
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -141,49 +151,15 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
           DIGEST: ${{ needs.publish.outputs.digest }}
-          DAILY_LOSS_USDT: ${{ vars.COTRADER_DAILY_LOSS_USDT }}
-          DRAWDOWN_USDT: ${{ vars.COTRADER_DRAWDOWN_USDT }}
-          AUTO_RECOVER_USDT: ${{ vars.COTRADER_UPBIT_USDT_AUTO_RECOVER }}
         run: |
           set -euo pipefail
           case "$DIGEST" in
             sha256:*) ;;
             *) echo "publish job did not report an image digest" >&2; exit 1 ;;
           esac
-          patch=$(python3 - <<'PY'
-          import json
-          import os
-          from decimal import Decimal, InvalidOperation
-
-          names = ("DAILY_LOSS_USDT", "DRAWDOWN_USDT")
-          values = {}
-          for name in names:
-              raw = os.environ.get(name, "")
-              try:
-                  value = Decimal(raw)
-              except InvalidOperation:
-                  raise SystemExit(f"{name} must be a decimal") from None
-              if not value.is_finite() or value <= 0:
-                  raise SystemExit(f"{name} must be a positive finite decimal")
-              values[name] = raw
-          if Decimal(values["DAILY_LOSS_USDT"]) > Decimal(values["DRAWDOWN_USDT"]):
-              raise SystemExit("DAILY_LOSS_USDT must not exceed DRAWDOWN_USDT")
-          auto = os.environ.get("AUTO_RECOVER_USDT", "").lower()
-          if auto not in {"true", "false"}:
-              raise SystemExit("AUTO_RECOVER_USDT must be true or false")
-          print(json.dumps({"data": {
-              "COTRADER_DAILY_LOSS_USDT": values["DAILY_LOSS_USDT"],
-              "COTRADER_DRAWDOWN_USDT": values["DRAWDOWN_USDT"],
-              "COTRADER_UPBIT_USDT_AUTO_RECOVER": auto,
-          }}))
-          PY
-          )
-          kubectl -n cotrader patch configmap cotrader-config --type merge --patch "$patch"
-          for name in cotrader-api cotrader-research cotrader-engine; do
-            kubectl -n cotrader set image "deployment/$name" "*=$IMAGE"
-            kubectl -n cotrader rollout status "deployment/$name" --timeout=10m
-          done
-      - name: Report the running workloads
+          kubectl -n cotrader set image deployment/cotrader-bot "*=$IMAGE"
+          kubectl -n cotrader rollout status deployment/cotrader-bot --timeout=10m
+      - name: Report the running workload
         if: success() || failure()
         run: |
           set -euo pipefail
@@ -191,6 +167,7 @@ jobs:
             -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas \
             >> "$GITHUB_STEP_SUMMARY"
           kubectl -n cotrader get configmap cotrader-config \
-            -o custom-columns=DAILY_LOSS_USDT:.data.COTRADER_DAILY_LOSS_USDT,DRAWDOWN_USDT:.data.COTRADER_DRAWDOWN_USDT,AUTO_RECOVER_USDT:.data.COTRADER_UPBIT_USDT_AUTO_RECOVER \
+            -o custom-columns=TOSS:.data.COTRADER_TOSS_ORDERS_ENABLED,KRW:.data.COTRADER_UPBIT_KRW_ORDERS_ENABLED,USDT:.data.COTRADER_UPBIT_USDT_ORDERS_ENABLED,TRANSFERS:.data.COTRADER_UPBIT_TRANSFERS_ENABLED \
             >> "$GITHUB_STEP_SUMMARY"
-          kubectl -n cotrader get pods --no-headers -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount
+          kubectl -n cotrader get pods --no-headers \
+            -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount
