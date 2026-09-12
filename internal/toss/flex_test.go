@@ -62,3 +62,53 @@ func TestDecodeErrorNamesTheEndpoint(t *testing.T) {
 		t.Errorf("오류 코드 %q", got)
 	}
 }
+
+// Toss wraps some list responses in an object and returns others bare. Reading
+// only one shape made a working account look broken.
+func TestListOfAcceptsBareAndWrappedLists(t *testing.T) {
+	cases := map[string]int{
+		`[{"a":1},{"a":2}]`:      2,
+		`{"holdings":[{"a":1}]}`: 1,
+		`{"holdings":[]}`:        0,
+		`{"holdings":null}`:      0,
+		`[]`:                     0,
+		`null`:                   0,
+	}
+	for body, want := range cases {
+		got, err := listOf(json.RawMessage(body), "holdings")
+		if err != nil {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		if len(got) != want {
+			t.Errorf("%s → %d건, want %d건", body, len(got), want)
+		}
+	}
+	for _, body := range []string{`{"other":[]}`, `{"holdings":5}`, `"text"`} {
+		if _, err := listOf(json.RawMessage(body), "holdings"); err == nil {
+			t.Errorf("%s: 오류가 없습니다", body)
+		}
+	}
+}
+
+// The shape log must name fields without ever revealing a value.
+func TestFieldNamesReportsKeysOnly(t *testing.T) {
+	names := fieldNames(json.RawMessage(`{"symbol":"QQQ","quantity":"10","averagePrice":"512.34"}`))
+	want := []string{"averagePrice", "quantity", "symbol"}
+	if len(names) != len(want) {
+		t.Fatalf("필드 %v", names)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("필드 %v, want %v", names, want)
+		}
+	}
+	for _, name := range names {
+		if name == "QQQ" || name == "10" || name == "512.34" {
+			t.Error("값이 필드 이름으로 보고되었습니다")
+		}
+	}
+	if fieldNames(json.RawMessage(`[1,2]`)) != nil {
+		t.Error("객체가 아닌 레코드에서 필드가 나왔습니다")
+	}
+}
