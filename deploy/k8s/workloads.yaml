@@ -1,111 +1,36 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cotrader-engine
+  name: cotrader-bot
 spec:
   replicas: 1
+  # Only one process may hold the order lock, so the old pod must be gone
+  # before the new one starts.
   strategy:
     type: Recreate
   selector:
-    matchLabels: {app: cotrader, role: engine}
+    matchLabels: {app: cotrader, role: bot}
   template:
     metadata:
-      labels: {app: cotrader, role: engine}
+      labels: {app: cotrader, role: bot}
     spec:
       automountServiceAccountToken: false
+      # Long enough for an in-flight order submission to finish.
       terminationGracePeriodSeconds: 90
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       containers:
-        - name: engine
+        - name: bot
           image: cotrader
-          args: [engine]
           envFrom:
             - configMapRef: {name: cotrader-config}
             - secretRef: {name: cotrader-database}
-            - secretRef: {name: cotrader-toss}
+            - secretRef: {name: cotrader-identity}
+            - secretRef: {name: cotrader-toss, optional: true}
             - secretRef: {name: cotrader-upbit, optional: true}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 512Mi}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cotrader-api
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels: {app: cotrader, role: api}
-  template:
-    metadata:
-      labels: {app: cotrader, role: api}
-    spec:
-      automountServiceAccountToken: false
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
-      containers:
-        - name: api
-          image: cotrader
-          args: [api, --host, "0.0.0.0"]
-          ports: [{containerPort: 8000}]
-          envFrom:
-            - configMapRef: {name: cotrader-config}
-            - secretRef: {name: cotrader-database}
-            - secretRef: {name: cotrader-identity}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          readinessProbe:
-            httpGet: {path: /health/ready, port: 8000}
-            periodSeconds: 10
-          livenessProbe:
-            httpGet: {path: /health/live, port: 8000}
-            periodSeconds: 20
-          resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 512Mi}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cotrader-research
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels: {app: cotrader, role: research}
-  template:
-    metadata:
-      labels: {app: cotrader, role: research}
-    spec:
-      automountServiceAccountToken: false
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
-      containers:
-        - name: research
-          image: cotrader
-          args: [research]
-          envFrom:
-            - configMapRef: {name: cotrader-config}
-            - secretRef: {name: cotrader-database}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 768Mi}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: cotrader-api
-spec:
-  selector: {app: cotrader, role: api}
-  ports: [{port: 80, targetPort: 8000}]
+            requests: {cpu: 50m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 128Mi}

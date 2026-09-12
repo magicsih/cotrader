@@ -6,7 +6,6 @@ resources:
   - config.yaml
   - ci-deployer.yaml
   - workloads.yaml
-  - ingress.yaml
   - network-policy.yaml
 images:
   - name: cotrader

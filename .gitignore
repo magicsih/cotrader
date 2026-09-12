@@ -1,27 +1,24 @@
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.env
-.env.*
-!.env.example
-node_modules/
-dist/
-artifacts/
-*.log
+# Go
+cotrader
+*.test
+*.out
+coverage.*
+
 .DS_Store
+*.log
 
 # Operator-owned data and configuration
 private/
 data/
 reports/
-backtests/
 logs/
+.env
+.env.*
+!.env.example
 *.env
 *.sql
+# The embedded schema is source, not operator data.
+!internal/store/migrations/*.sql
 *.sqlite*
 *.db
 *.csv

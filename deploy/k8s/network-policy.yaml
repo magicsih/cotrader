@@ -5,12 +5,9 @@ metadata:
 spec:
   podSelector:
     matchLabels: {app: cotrader}
+  # The bot serves nothing: it polls Telegram and the exchanges outbound only,
+  # so no ingress rule is declared and none is allowed.
   policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: ingress}
-      ports: [{protocol: TCP, port: 8000}]
   egress:
     - to:
         - namespaceSelector:
