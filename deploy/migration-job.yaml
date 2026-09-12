@@ -1,0 +1,34 @@
+# One-off schema migration. It runs with the operator's migration credentials,
+# which hold the DDL rights the bot deliberately does not have.
+#
+#   kubectl -n cotrader delete job cotrader-migrate --ignore-not-found
+#   kubectl -n cotrader apply -f deploy/migration-job.yaml
+#   kubectl -n cotrader logs job/cotrader-migrate
+#
+# Scale the bot down first: the migration takes the same single-writer lock.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cotrader-migrate
+  namespace: cotrader
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      containers:
+        - name: migrate
+          image: cotrader
+          args: [migrate]
+          envFrom:
+            - secretRef: {name: cotrader-migration-database}
+            - secretRef: {name: cotrader-identity}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 128Mi}

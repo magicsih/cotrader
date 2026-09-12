@@ -7,6 +7,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,10 +68,9 @@ func (d *DB) Close() error { return d.sql.Close() }
 // SQL exposes the handle for the migration runner.
 func (d *DB) SQL() *sql.DB { return d.sql }
 
-// Migrate brings the schema up to date.
-//
-// It runs while the caller holds the single-writer lock, so no second process
-// can be changing the schema at the same time.
+// Migrate brings the schema up to date. It needs DDL rights and is therefore
+// run by the operator's migration credentials, never by the bot: an always-on
+// process has no business holding the privilege to drop its own tables.
 func (d *DB) Migrate(ctx context.Context) error {
 	goose.SetBaseFS(migrations)
 	goose.SetLogger(goose.NopLogger())
@@ -81,6 +81,56 @@ func (d *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("스키마 마이그레이션 실패: %w", err)
 	}
 	return nil
+}
+
+// Verify reports whether the schema this build expects has been applied.
+//
+// It only reads. The bot runs with data rights alone, so it cannot create the
+// schema and must not pretend it can: starting against a schema older than the
+// code would write rows the tables cannot hold.
+func (d *DB) Verify(ctx context.Context) error {
+	want, err := expectedVersion()
+	if err != nil {
+		return err
+	}
+	var applied sql.NullInt64
+	err = d.sql.QueryRowContext(ctx,
+		`SELECT MAX(version_id) FROM goose_db_version WHERE is_applied = 1`).Scan(&applied)
+	if err != nil {
+		return fmt.Errorf(
+			"스키마 버전을 읽지 못했습니다. 마이그레이션 자격증명으로 cotrader migrate를 먼저 실행하세요: %w", err)
+	}
+	if !applied.Valid || applied.Int64 < want {
+		return fmt.Errorf(
+			"스키마가 %d번까지 적용되어야 하는데 %d번입니다. 마이그레이션 자격증명으로 cotrader migrate를 실행하세요",
+			want, applied.Int64)
+	}
+	return nil
+}
+
+// expectedVersion is the highest migration compiled into this binary.
+func expectedVersion() (int64, error) {
+	entries, err := migrations.ReadDir("migrations")
+	if err != nil {
+		return 0, fmt.Errorf("내장 마이그레이션을 읽지 못했습니다")
+	}
+	var highest int64
+	for _, entry := range entries {
+		name := entry.Name()
+		digits, _, found := strings.Cut(name, "_")
+		if !found {
+			continue
+		}
+		version, err := strconv.ParseInt(digits, 10, 64)
+		if err != nil {
+			continue
+		}
+		highest = max(highest, version)
+	}
+	if highest == 0 {
+		return 0, fmt.Errorf("내장 마이그레이션이 없습니다")
+	}
+	return highest, nil
 }
 
 // Lock is the advisory lock proving this process is the only writer.

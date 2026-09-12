@@ -30,11 +30,43 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := migrate(ctx); err != nil {
+			log.Error("마이그레이션 실패", "error", err)
+			os.Exit(1)
+		}
+		log.Info("마이그레이션 적용 완료")
+		return
+	}
+
 	if err := run(ctx, log); err != nil {
 		log.Error("종료", "error", err)
 		os.Exit(1)
 	}
 	log.Info("정상 종료")
+}
+
+// migrate applies the schema. It is a separate entry point because it needs
+// DDL rights the bot deliberately does not have, and is run as a one-off job
+// with the operator's migration credentials.
+func migrate(ctx context.Context) error {
+	settings, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(ctx, settings.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// The same lock the bot holds, so a migration cannot run beside a live bot.
+	lock, err := db.Acquire(ctx, store.LockName)
+	if err != nil {
+		return err
+	}
+	defer lock.Release(context.WithoutCancel(ctx))
+	return db.Migrate(ctx)
 }
 
 func run(ctx context.Context, log *slog.Logger) error {
@@ -56,9 +88,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	defer lock.Release(context.WithoutCancel(ctx))
 
-	// Migrating under the lock means no second process can be changing the
-	// schema at the same time, so no separate migration step is needed.
-	if err := db.Migrate(ctx); err != nil {
+	// The bot only checks the schema. Applying it needs DDL rights, which an
+	// always-on process should not hold.
+	if err := db.Verify(ctx); err != nil {
 		return err
 	}
 
