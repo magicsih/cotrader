@@ -404,3 +404,38 @@ func TestUpdateTransferReportsAMissingRow(t *testing.T) {
 		t.Errorf("없는 이체 갱신 오류 %v", err)
 	}
 }
+
+// The bot runs with data rights alone, so it must detect a schema older than
+// its code rather than write rows the tables cannot hold.
+func TestVerifyAcceptsTheAppliedSchema(t *testing.T) {
+	db := fresh(t)
+	if err := db.Verify(context.Background()); err != nil {
+		t.Errorf("적용된 스키마가 거절되었습니다: %v", err)
+	}
+}
+
+func TestVerifyRefusesAMissingOrOldSchema(t *testing.T) {
+	ctx := context.Background()
+	db := fresh(t)
+
+	// A schema behind the code must be refused by name and number.
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE goose_db_version SET is_applied = 0`); err != nil {
+		t.Fatalf("버전 조정 실패: %v", err)
+	}
+	err := db.Verify(ctx)
+	if err == nil {
+		t.Fatal("오래된 스키마가 통과했습니다")
+	}
+	if !contains(err.Error(), "cotrader migrate") {
+		t.Errorf("오류가 조치를 안내하지 않습니다: %v", err)
+	}
+
+	// No version table at all is the first-run case and must say the same.
+	if _, err := db.SQL().ExecContext(ctx, `DROP TABLE goose_db_version`); err != nil {
+		t.Fatalf("버전 테이블 삭제 실패: %v", err)
+	}
+	if err := db.Verify(ctx); err == nil {
+		t.Error("버전 테이블이 없는데 통과했습니다")
+	}
+}

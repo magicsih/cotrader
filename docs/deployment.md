@@ -26,15 +26,32 @@
 - `cotrader-identity` — `TELEGRAM_API_KEY`, `TELEGRAM_ME`
 - `cotrader-toss` — 선택. 토스 클라이언트 ID·시크릿과 `COTRADER_ACCOUNT_SEQ`
 - `cotrader-upbit` — 선택. 업비트 키 세 쌍
+- `cotrader-migration-database` — 스키마 변경이 있을 때만. `COTRADER_DATABASE_URL`에 DDL 권한 계정
 
-마이그레이션은 기동 시 실행 잠금을 쥔 상태에서 적용하므로 별도 Job이 없습니다.
+## 스키마 변경
+
+봇은 스키마를 **확인만** 합니다. 적용에는 DDL 권한이 필요한데, 항상 떠 있는 프로세스가 자기 테이블을 지울 수 있는 권한까지 가질 이유가 없습니다. 런타임 계정은 SELECT·INSERT·UPDATE·DELETE만 가집니다.
+
+코드가 기대하는 스키마보다 DB가 낮으면 봇은 **기동을 거부하고** 무엇을 해야 하는지 말합니다. 낮은 스키마에 맞지 않는 행을 쓰느니 뜨지 않는 편이 낫습니다.
+
+스키마 변경이 포함된 배포는 이 순서로 합니다.
+
+```bash
+kubectl -n cotrader scale deployment/cotrader-bot --replicas=0
+kubectl -n cotrader delete job cotrader-migrate --ignore-not-found
+kubectl -n cotrader apply -f deploy/migration-job.yaml
+kubectl -n cotrader logs job/cotrader-migrate
+kubectl -n cotrader scale deployment/cotrader-bot --replicas=1
+```
+
+봇을 먼저 내리는 이유는 마이그레이션이 같은 단일 실행 잠금을 가져가기 때문입니다. 두 쪽이 동시에 스키마를 건드릴 수 없습니다.
 
 ## 실행 순서
 
 1. CI의 정적 검사·테스트·양쪽 아키텍처 빌드를 통과시킵니다. `kubectl kustomize deploy/k8s`로 출력물을 검토합니다.
 2. `main`에 반영된 커밋이 CI를 통과하면 `sha-<commit>` 이미지가 GitHub Container Registry에 올라갑니다. CI 요약의 digest로 운영 이미지를 고정합니다.
 3. DB·Secret·백업을 준비합니다. Secret 동기화는 값이 출력되지 않는 승인된 경로를 씁니다.
-4. 주문 스위치를 모두 끈 상태로 배포합니다. 첫 기동에서 스키마가 만들어집니다.
+4. 주문 스위치를 모두 끈 상태로 배포합니다. 스키마 변경이 포함되어 있으면 위 절차를 먼저 실행합니다.
 5. 텔레그램 연결과 잔고 조회를 확인한 뒤 [운영 문서](live-trading.md)의 절차로 시장을 하나씩 켭니다.
 
 ## GitHub Actions
