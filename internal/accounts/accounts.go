@@ -181,16 +181,23 @@ func (s *Service) Positions(ctx context.Context, venue market.Venue) ([]Position
 	quote := venue.Currency()
 	out := make([]Position, 0, len(record.Value.Balances))
 	for _, balance := range record.Value.Balances {
-		// A coin is tradable on this venue only when the exchange priced it in
-		// this venue's currency; the same coin can sit in both books.
-		if balance.Currency == quote || balance.UnitCurrency != quote || balance.Balance.Sign() <= 0 {
+		// The venue's own cash is not a position. Won is never a coin on
+		// either book, but USDT is: KRW-USDT is a real pair, so it stays
+		// listed on the won book.
+		if balance.Currency == quote || balance.Currency == "KRW" {
 			continue
 		}
+		if balance.Balance.Sign() <= 0 {
+			continue
+		}
+		// A coin can be sold on either book whatever it was bought on, but the
+		// average cost is only meaningful in the currency it was recorded in.
+		sameCurrency := balance.UnitCurrency == quote
 		out = append(out, Position{
 			Symbol:       quote + "-" + balance.Currency,
 			Quantity:     balance.Balance,
 			AveragePrice: balance.AvgBuyPrice,
-			HasAverage:   balance.AvgBuyPrice.Sign() > 0,
+			HasAverage:   sameCurrency && balance.AvgBuyPrice.Sign() > 0,
 		})
 	}
 	return sorted(out), nil

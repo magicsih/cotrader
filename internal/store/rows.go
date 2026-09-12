@@ -194,33 +194,35 @@ func (l *Ladder) Step() string {
 }
 
 // Clear returns the draft to an earlier question, dropping the answers that
-// depended on the one being changed.
+// depended on the one being changed. A ladder must never be priced from a mix
+// of old and new choices.
 func (l *Ladder) Clear(step string) {
-	switch step {
-	case "symbol":
-		l.Symbol, l.Basis, l.BasePrice = "", "", decimal.Zero
-		fallthrough
-	case "basis":
-		if step == "basis" {
-			l.Basis, l.BasePrice = "", decimal.Zero
+	// Each answer invalidates every answer after it, so clearing walks the
+	// questions in order from the one being changed.
+	questions := []struct {
+		name  string
+		reset func()
+	}{
+		{"symbol", func() { l.Symbol = "" }},
+		{"basis", func() { l.Basis, l.BasePrice = "", decimal.Zero }},
+		{"base", func() { l.BasePrice = decimal.Zero }},
+		{"start", func() { l.StartPct = Unset }},
+		{"end", func() { l.EndPct = Unset }},
+		{"rungs", func() { l.Rungs = 0 }},
+		{"total", func() { l.Total = decimal.Zero }},
+	}
+	from := -1
+	for i, question := range questions {
+		if question.name == step {
+			from = i
+			break
 		}
-		fallthrough
-	case "base":
-		if step == "base" {
-			l.BasePrice = decimal.Zero
-		}
-		l.StartPct, l.EndPct = Unset, Unset
-		l.Rungs, l.Total = 0, decimal.Zero
-	case "start":
-		l.StartPct, l.EndPct = Unset, Unset
-		l.Rungs, l.Total = 0, decimal.Zero
-	case "end":
-		l.EndPct = Unset
-		l.Rungs, l.Total = 0, decimal.Zero
-	case "rungs":
-		l.Rungs, l.Total = 0, decimal.Zero
-	case "total":
-		l.Total = decimal.Zero
+	}
+	if from < 0 {
+		return
+	}
+	for _, question := range questions[from:] {
+		question.reset()
 	}
 	l.EntryField, l.EntryValue = "", ""
 }
