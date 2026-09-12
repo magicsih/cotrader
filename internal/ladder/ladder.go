@@ -11,37 +11,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Side is the direction of every rung in a ladder.
-type Side string
-
-const (
-	Buy  Side = "BUY"
-	Sell Side = "SELL"
-)
-
-// Valid reports whether s is a direction we can submit.
-func (s Side) Valid() bool { return s == Buy || s == Sell }
-
-// Label is the Korean display name shown in Telegram.
-func (s Side) Label() string {
-	switch s {
-	case Buy:
-		return "매수"
-	case Sell:
-		return "매도"
-	}
-	return string(s)
-}
-
-// rounding favours the operator: a seller never gives away a tick, a buyer
-// never pays one.
-func (s Side) rounding() market.Rounding {
-	if s == Sell {
-		return market.RoundUp
-	}
-	return market.RoundDown
-}
-
 // maxRungs caps how many orders one ladder may hold, whatever the budget.
 const maxRungs = 50
 
@@ -53,7 +22,7 @@ const divPlaces = 18
 type Spec struct {
 	Venue  market.Venue
 	Symbol string
-	Side   Side
+	Side   market.Side
 
 	// Base is the reference price: last trade, average cost, or a typed value.
 	Base decimal.Decimal
@@ -122,7 +91,7 @@ func (p Plan) AveragePrice() decimal.Decimal {
 // bounds are the untouched first and last prices of the ladder.
 func (s Spec) bounds() (start, end decimal.Decimal) {
 	one := decimal.NewFromInt(1)
-	if s.Side == Sell {
+	if s.Side == market.Sell {
 		return s.Base.Mul(one.Add(s.StartPct)), s.Base.Mul(one.Add(s.EndPct))
 	}
 	return s.Base.Mul(one.Sub(s.StartPct)), s.Base.Mul(one.Sub(s.EndPct))
@@ -148,7 +117,7 @@ func (s Spec) Validate() error {
 	if !s.EndPct.GreaterThan(s.StartPct) {
 		return fmt.Errorf("종료 오프셋은 시작 오프셋보다 커야 합니다")
 	}
-	if s.Side == Buy && s.EndPct.GreaterThanOrEqual(decimal.NewFromInt(1)) {
+	if s.Side == market.Buy && s.EndPct.GreaterThanOrEqual(decimal.NewFromInt(1)) {
 		return fmt.Errorf("매수 종료 오프셋은 100%% 미만이어야 합니다")
 	}
 	if s.Rungs < 1 || s.Rungs > maxRungs {
@@ -168,7 +137,7 @@ func MaxRungs(spec Spec) int {
 		return 0
 	}
 	start, _ := spec.bounds()
-	start = market.PriceTick(start, spec.Venue, spec.Side.rounding())
+	start = market.PriceTick(start, spec.Venue, spec.Side.Rounding())
 	if start.Sign() <= 0 {
 		return 0
 	}
@@ -180,7 +149,7 @@ func MaxRungs(spec Spec) int {
 		return 0
 	}
 	budget := spec.Total
-	if spec.Side == Buy {
+	if spec.Side == market.Buy {
 		need = need.Mul(start)
 	} else {
 		budget = market.RoundQuantity(budget, spec.Venue)
@@ -196,7 +165,7 @@ func Build(spec Spec) (Plan, error) {
 		return Plan{}, err
 	}
 	start, end := spec.bounds()
-	snapped := snap(geometric(start, end, spec.Rungs), spec.Venue, spec.Side.rounding())
+	snapped := snap(geometric(start, end, spec.Rungs), spec.Venue, spec.Side.Rounding())
 	if len(snapped) == 0 {
 		return Plan{}, fmt.Errorf("호가 단위로 정리한 가격이 없습니다")
 	}
@@ -261,7 +230,7 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 		rungs[i] = Rung{Index: i, Price: price}
 	}
 
-	if spec.Side == Sell {
+	if spec.Side == market.Sell {
 		total := market.RoundQuantity(spec.Total, spec.Venue)
 		each, leftover := market.Divide(total, len(prices), spec.Venue)
 		for i := range rungs {

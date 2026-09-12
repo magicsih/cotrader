@@ -289,3 +289,42 @@ func Divide(value decimal.Decimal, n int, v Venue) (each, leftover decimal.Decim
 	each, _ = value.QuoRem(decimal.NewFromInt(int64(n)), places(v))
 	return each, value.Sub(each.Mul(decimal.NewFromInt(int64(n))))
 }
+
+// Side is the direction of an order.
+type Side string
+
+const (
+	Buy  Side = "BUY"
+	Sell Side = "SELL"
+)
+
+// Valid reports whether s is a direction we can submit.
+func (s Side) Valid() bool { return s == Buy || s == Sell }
+
+// Label is the Korean display name shown in Telegram.
+func (s Side) Label() string {
+	switch s {
+	case Buy:
+		return "매수"
+	case Sell:
+		return "매도"
+	}
+	return string(s)
+}
+
+// Opposite is the direction that closes this one.
+func (s Side) Opposite() Side {
+	if s == Buy {
+		return Sell
+	}
+	return Buy
+}
+
+// Rounding favours the operator: a seller never gives away a tick by rounding
+// a limit down, and a buyer never pays one by rounding up.
+func (s Side) Rounding() Rounding {
+	if s == Sell {
+		return RoundUp
+	}
+	return RoundDown
+}

@@ -21,7 +21,7 @@ func dec(t *testing.T, s string) decimal.Decimal {
 func sellSpec(t *testing.T) Spec {
 	t.Helper()
 	return Spec{
-		Venue: market.Upbit, Symbol: "KRW-SOL", Side: Sell,
+		Venue: market.Upbit, Symbol: "KRW-SOL", Side: market.Sell,
 		Base: dec(t, "200000"), StartPct: dec(t, "0.025"), EndPct: dec(t, "0.10"),
 		Rungs: 10, Total: dec(t, "20"),
 	}
@@ -30,7 +30,7 @@ func sellSpec(t *testing.T) Spec {
 func buySpec(t *testing.T) Spec {
 	t.Helper()
 	return Spec{
-		Venue: market.Upbit, Symbol: "KRW-SOL", Side: Buy,
+		Venue: market.Upbit, Symbol: "KRW-SOL", Side: market.Buy,
 		Base: dec(t, "100000"), StartPct: dec(t, "0.02"), EndPct: dec(t, "0.10"),
 		Rungs: 5, Total: dec(t, "1000000"),
 	}
@@ -153,9 +153,9 @@ func TestBuyNeverExceedsBudgetAndBeatsFlatQuantity(t *testing.T) {
 
 func TestTossQuantitiesAreWholeShares(t *testing.T) {
 	for _, spec := range []Spec{
-		{Venue: market.Toss, Symbol: "QQQ", Side: Sell, Base: dec(t, "500"),
+		{Venue: market.Toss, Symbol: "QQQ", Side: market.Sell, Base: dec(t, "500"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Rungs: 5, Total: dec(t, "23")},
-		{Venue: market.Toss, Symbol: "QQQ", Side: Buy, Base: dec(t, "500"),
+		{Venue: market.Toss, Symbol: "QQQ", Side: market.Buy, Base: dec(t, "500"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Rungs: 5, Total: dec(t, "10000")},
 	} {
 		plan := mustBuild(t, spec)
@@ -174,7 +174,7 @@ func TestTossQuantitiesAreWholeShares(t *testing.T) {
 // plan must merge them rather than submit duplicate prices.
 func TestTickCollisionsMerge(t *testing.T) {
 	spec := Spec{
-		Venue: market.Upbit, Symbol: "KRW-BTC", Side: Sell,
+		Venue: market.Upbit, Symbol: "KRW-BTC", Side: market.Sell,
 		Base:     dec(t, "150000000"), // tick is 1,000 KRW up here
 		StartPct: dec(t, "0.0001"), EndPct: dec(t, "0.0002"),
 		Rungs: 20, Total: dec(t, "2"),
@@ -199,13 +199,13 @@ func TestTickCollisionsMerge(t *testing.T) {
 // reject the one above it.
 func TestMaxRungsIsTheHighestBuildableCount(t *testing.T) {
 	specs := map[string]Spec{
-		"업비트 매도": {Venue: market.Upbit, Symbol: "KRW-SOL", Side: Sell, Base: dec(t, "200000"),
+		"업비트 매도": {Venue: market.Upbit, Symbol: "KRW-SOL", Side: market.Sell, Base: dec(t, "200000"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Total: dec(t, "0.5")},
-		"업비트 매수": {Venue: market.Upbit, Symbol: "KRW-SOL", Side: Buy, Base: dec(t, "200000"),
+		"업비트 매수": {Venue: market.Upbit, Symbol: "KRW-SOL", Side: market.Buy, Base: dec(t, "200000"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Total: dec(t, "38000")},
-		"토스 매수": {Venue: market.Toss, Symbol: "QQQ", Side: Buy, Base: dec(t, "500"),
+		"토스 매수": {Venue: market.Toss, Symbol: "QQQ", Side: market.Buy, Base: dec(t, "500"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Total: dec(t, "3000")},
-		"토스 매도": {Venue: market.Toss, Symbol: "QQQ", Side: Sell, Base: dec(t, "500"),
+		"토스 매도": {Venue: market.Toss, Symbol: "QQQ", Side: market.Sell, Base: dec(t, "500"),
 			StartPct: dec(t, "0.01"), EndPct: dec(t, "0.10"), Total: dec(t, "7")},
 	}
 	for name, spec := range specs {
