@@ -400,3 +400,28 @@ func (d *DB) StateUpdatedAt(ctx context.Context, name string) (time.Time, bool, 
 	}
 	return updatedAt, true, nil
 }
+
+// LiveOrder reads one order together with the market it belongs to.
+func (d *DB) LiveOrder(ctx context.Context, id string) (*LiveOrder, error) {
+	var live LiveOrder
+	var brokerID sql.NullString
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT o.id, o.ladder_id, o.rung, o.price, o.quantity, o.status, o.broker_id,
+		       o.submitted_at, o.filled_quantity, o.filled_amount, o.costs, o.costs_final,
+		       o.notified_quantity, o.reason, o.created_at, o.updated_at,
+		       l.venue, l.symbol, l.side
+		FROM ladder_orders o JOIN ladders l ON l.id = o.ladder_id
+		WHERE o.id = ?`, id).Scan(
+		&live.ID, &live.LadderID, &live.Rung, &live.Price, &live.Quantity, &live.Status,
+		&brokerID, &live.SubmittedAt, &live.FilledQuantity, &live.FilledAmount, &live.Costs,
+		&live.CostsFinal, &live.NotifiedQuantity, &live.Reason, &live.CreatedAt, &live.UpdatedAt,
+		&live.Venue, &live.Symbol, &live.Side)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("주문 조회 실패: %w", err)
+	}
+	live.BrokerID = brokerID.String
+	return &live, nil
+}

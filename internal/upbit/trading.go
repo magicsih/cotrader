@@ -186,10 +186,11 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]broker.OpenOr
 			return nil, err
 		}
 		var batch []struct {
-			UUID       string `json:"uuid"`
-			Market     string `json:"market"`
-			Identifier string `json:"identifier"`
-			Side       string `json:"side"`
+			UUID           string          `json:"uuid"`
+			Market         string          `json:"market"`
+			Identifier     string          `json:"identifier"`
+			Side           string          `json:"side"`
+			ExecutedVolume decimal.Decimal `json:"executed_volume"`
 		}
 		if err := decode(payload, &batch); err != nil {
 			return nil, err
@@ -202,10 +203,11 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]broker.OpenOr
 			}
 			seen[row.UUID] = true
 			out = append(out, broker.OpenOrder{
-				BrokerID: row.UUID,
-				ClientID: row.Identifier,
-				Symbol:   row.Market,
-				Side:     sideOf(row.Side),
+				BrokerID:       row.UUID,
+				ClientID:       row.Identifier,
+				Symbol:         row.Market,
+				Side:           sideOf(row.Side),
+				FilledQuantity: row.ExecutedVolume,
 			})
 		}
 		if len(batch) < 100 {

@@ -131,13 +131,17 @@ type OrderState struct {
 	CostsFinal bool
 }
 
-// OpenOrder is one entry of an exchange's resting-order list. It carries only
-// what reconciliation needs to match a listing against our own rows.
+// OpenOrder is one entry of an exchange's resting-order list.
+//
+// It carries the filled quantity as well as the identity, which is what lets
+// reconciliation read the whole book in one call and then fetch details only
+// for the orders that actually moved.
 type OpenOrder struct {
-	BrokerID string
-	ClientID string
-	Symbol   string
-	Side     market.Side
+	BrokerID       string
+	ClientID       string
+	Symbol         string
+	Side           market.Side
+	FilledQuantity decimal.Decimal
 }
 
 // Quote is the top of an order book.

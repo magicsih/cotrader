@@ -166,9 +166,10 @@ func (c *Client) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 	}
 	var payload struct {
 		Orders []struct {
-			OrderID string `json:"orderId"`
-			Symbol  string `json:"symbol"`
-			Side    string `json:"side"`
+			OrderID        string          `json:"orderId"`
+			Symbol         string          `json:"symbol"`
+			Side           string          `json:"side"`
+			FilledQuantity decimal.Decimal `json:"filledQuantity"`
 		} `json:"orders"`
 	}
 	if err := decode(result, &payload); err != nil {
@@ -177,9 +178,10 @@ func (c *Client) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 	out := make([]broker.OpenOrder, 0, len(payload.Orders))
 	for _, row := range payload.Orders {
 		out = append(out, broker.OpenOrder{
-			BrokerID: row.OrderID,
-			Symbol:   row.Symbol,
-			Side:     market.Side(row.Side),
+			BrokerID:       row.OrderID,
+			Symbol:         row.Symbol,
+			Side:           market.Side(row.Side),
+			FilledQuantity: row.FilledQuantity,
 			// Toss does not echo clientOrderId in listings, so an order can
 			// only be tied back to us through the id we stored on submission.
 		})
