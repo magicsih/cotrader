@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/magicsih/cotrader/internal/broker"
@@ -14,8 +15,8 @@ import (
 
 // Account is one account on the Toss login.
 type Account struct {
-	AccountSeq  string `json:"accountSeq"`
-	AccountNo   string `json:"accountNo"`
+	AccountSeq  id     `json:"accountSeq"`
+	AccountNo   id     `json:"accountNo"`
 	AccountType string `json:"accountType"`
 }
 
@@ -67,7 +68,7 @@ func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
 		return nil, err
 	}
 	var accounts []Account
-	if err := decode(result, &accounts); err != nil {
+	if err := decode("/api/v1/accounts", result, &accounts); err != nil {
 		return nil, err
 	}
 	return accounts, nil
@@ -85,7 +86,7 @@ func (c *Client) BuyingPower(ctx context.Context, currency string) (decimal.Deci
 	var payload struct {
 		CashBuyingPower decimal.Decimal `json:"cashBuyingPower"`
 	}
-	if err := decode(result, &payload); err != nil {
+	if err := decode("/api/v1/buying-power", result, &payload); err != nil {
 		return decimal.Zero, err
 	}
 	return payload.CashBuyingPower, nil
@@ -100,7 +101,7 @@ func (c *Client) Holdings(ctx context.Context) ([]Holding, error) {
 		return nil, err
 	}
 	var records []json.RawMessage
-	if err := decode(result, &records); err != nil {
+	if err := decode("/api/v1/holdings", result, &records); err != nil {
 		return nil, err
 	}
 	holdings := make([]Holding, 0, len(records))
@@ -125,7 +126,7 @@ func (c *Client) CommissionRate(ctx context.Context) (decimal.Decimal, error) {
 		MarketCountry  string          `json:"marketCountry"`
 		CommissionRate decimal.Decimal `json:"commissionRate"`
 	}
-	if err := decode(result, &rows); err != nil {
+	if err := decode("/api/v1/commissions", result, &rows); err != nil {
 		return decimal.Zero, err
 	}
 	for _, row := range rows {
@@ -148,7 +149,7 @@ func (c *Client) Sellable(ctx context.Context, symbol string) (decimal.Decimal, 
 	var payload struct {
 		SellableQuantity decimal.Decimal `json:"sellableQuantity"`
 	}
-	if err := decode(result, &payload); err != nil {
+	if err := decode("/api/v1/sellable-quantity", result, &payload); err != nil {
 		return decimal.Zero, err
 	}
 	return payload.SellableQuantity, nil
@@ -166,19 +167,19 @@ func (c *Client) OpenOrders(ctx context.Context) ([]broker.OpenOrder, error) {
 	}
 	var payload struct {
 		Orders []struct {
-			OrderID        string          `json:"orderId"`
+			OrderID        id              `json:"orderId"`
 			Symbol         string          `json:"symbol"`
 			Side           string          `json:"side"`
 			FilledQuantity decimal.Decimal `json:"filledQuantity"`
 		} `json:"orders"`
 	}
-	if err := decode(result, &payload); err != nil {
+	if err := decode("/api/v1/orders", result, &payload); err != nil {
 		return nil, err
 	}
 	out := make([]broker.OpenOrder, 0, len(payload.Orders))
 	for _, row := range payload.Orders {
 		out = append(out, broker.OpenOrder{
-			BrokerID:       row.OrderID,
+			BrokerID:       row.OrderID.String(),
 			Symbol:         row.Symbol,
 			Side:           market.Side(row.Side),
 			FilledQuantity: row.FilledQuantity,
@@ -199,7 +200,7 @@ func (c *Client) Order(ctx context.Context, brokerID string) (*broker.OrderState
 		return nil, err
 	}
 	var raw rawOrder
-	if err := decode(result, &raw); err != nil {
+	if err := decode("/api/v1/orders/detail", result, &raw); err != nil {
 		return nil, err
 	}
 	return raw.normalize()
@@ -242,12 +243,12 @@ func (c *Client) Place(ctx context.Context, req broker.OrderRequest) (string, er
 		return "", err
 	}
 	var payload struct {
-		OrderID string `json:"orderId"`
+		OrderID id `json:"orderId"`
 	}
 	if err := json.Unmarshal(result, &payload); err != nil || payload.OrderID == "" {
 		return "", broker.Unresolved("toss-invalid-submission")
 	}
-	return payload.OrderID, nil
+	return payload.OrderID.String(), nil
 }
 
 // Cancel asks Toss to withdraw an order. Acceptance is not completion.
@@ -291,11 +292,11 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 			}
 			return nil, broker.Fail("toss-account-selection-required")
 		}
-		c.setAccountSeq(brokerage[0].AccountSeq)
+		c.setAccountSeq(brokerage[0].AccountSeq.String())
 	}
 	var chosen *Account
 	for i := range brokerage {
-		if brokerage[i].AccountSeq == c.AccountSeq() {
+		if brokerage[i].AccountSeq.String() == c.AccountSeq() {
 			chosen = &brokerage[i]
 		}
 	}
@@ -337,16 +338,19 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 
 // mask keeps only the last four digits of an account number, which is all that
 // is ever needed to recognise it.
-func mask(accountNo string) string {
-	if len(accountNo) <= 4 {
+func mask(accountNo id) string {
+	text := accountNo.String()
+	if len(text) <= 4 {
 		return "••••"
 	}
-	return "••••" + accountNo[len(accountNo)-4:]
+	return "••••" + text[len(text)-4:]
 }
 
-func decode(raw json.RawMessage, out any) error {
+// decode names the call in its error. A bare "invalid response" tells the
+// operator nothing about which endpoint changed shape.
+func decode(path string, raw json.RawMessage, out any) error {
 	if err := json.Unmarshal(raw, out); err != nil {
-		return broker.Fail("toss-invalid-response")
+		return broker.Fail("toss-invalid-response" + strings.ReplaceAll(path, "/", "-"))
 	}
 	return nil
 }
