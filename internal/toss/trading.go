@@ -72,8 +72,9 @@ func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, err := listOf(result, "accounts")
+	records, _, err := listOf(result, "accounts")
 	if err != nil {
+		slog.Warn("토스 계좌 목록 모양", "error", err)
 		return nil, broker.Fail("toss-invalid-response-api-v1-accounts")
 	}
 	accounts := make([]Account, 0, len(records))
@@ -113,17 +114,20 @@ func (c *Client) Holdings(ctx context.Context) ([]Holding, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, err := listOf(result, "holdings")
+	records, wrapper, err := listOf(result, "holdings")
 	if err != nil {
+		slog.Warn("토스 보유 목록 모양", "error", err)
 		return nil, broker.Fail("toss-invalid-response-api-v1-holdings")
 	}
-	// The average-cost field name has never been confirmed against a live
-	// response, so the keys of one record are logged once. Names only.
-	if len(records) > 0 {
-		holdingShape.Do(func() {
-			slog.Info("토스 보유 응답 필드", "fields", fieldNames(records[0]))
-		})
-	}
+	// Neither the wrapper name nor the average-cost field has been confirmed
+	// against a live response, so both are reported once. Names only.
+	holdingShape.Do(func() {
+		fields := []string(nil)
+		if len(records) > 0 {
+			fields = fieldNames(records[0])
+		}
+		slog.Info("토스 보유 응답 모양", "wrapper", wrapper, "records", len(records), "fields", fields)
+	})
 	holdings := make([]Holding, 0, len(records))
 	for _, record := range records {
 		var holding Holding
@@ -142,8 +146,9 @@ func (c *Client) CommissionRate(ctx context.Context) (decimal.Decimal, error) {
 	if err != nil {
 		return decimal.Zero, err
 	}
-	records, err := listOf(result, "commissions")
+	records, _, err := listOf(result, "commissions")
 	if err != nil {
+		slog.Warn("토스 수수료 목록 모양", "error", err)
 		return decimal.Zero, broker.Fail("toss-invalid-response-api-v1-commissions")
 	}
 	for _, record := range records {
