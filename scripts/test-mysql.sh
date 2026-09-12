@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Runs the Go test suite with a throwaway MySQL so the integration tests have a
+# real server. The container uses tmpfs and is removed on exit.
 set -euo pipefail
 test_container="cotrader-test-$$"
 cleanup() { docker rm -f "$test_container" >/dev/null 2>&1 || true; }
@@ -21,5 +23,5 @@ if [[ "$test_db_ready" != 1 ]]; then
   exit 1
 fi
 test_port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "$test_container")"
-export COTRADER_TEST_DATABASE_URL="mysql+asyncmy://cotrader:isolated-test-only@127.0.0.1:${test_port}/cotrader_test"
-.venv/bin/pytest "$@"
+export COTRADER_TEST_DSN="cotrader:isolated-test-only@tcp(127.0.0.1:${test_port})/cotrader_test"
+go test "$@" ./...

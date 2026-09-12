@@ -16,7 +16,7 @@ case "${1:-start}" in
     for attempt in {1..60}; do
       if docker exec cotrader-dev-mysql mysql --protocol=TCP --host=127.0.0.1 --user=cotrader \
         --password=local-development-only --database=cotrader --execute='SELECT 1' >/dev/null 2>&1; then
-        echo '로컬 MySQL 준비됨: 127.0.0.1:13316/cotrader'
+        echo '로컬 MySQL 준비됨: cotrader:local-development-only@tcp(127.0.0.1:13316)/cotrader'
         exit 0
       fi
       sleep 1

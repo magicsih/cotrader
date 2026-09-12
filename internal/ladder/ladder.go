@@ -257,3 +257,75 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 	}
 	return rungs, nil
 }
+
+// State is where a ladder sits in its life.
+type State string
+
+const (
+	// StateDraft is a ladder being assembled through the Telegram keyboard.
+	// It holds no orders and nothing has been sent.
+	StateDraft State = "DRAFT"
+	// StatePlacing means orders are being submitted one rung at a time.
+	StatePlacing State = "PLACING"
+	// StateOpen means every rung that was going to be sent has been sent and
+	// at least one is still working at the exchange.
+	StateOpen State = "OPEN"
+	// StateDone means no rung is active any more.
+	StateDone State = "DONE"
+	// StateCanceled means the operator withdrew the ladder.
+	StateCanceled State = "CANCELED"
+	// StateFailed means submission stopped part-way and needs a decision.
+	StateFailed State = "FAILED"
+)
+
+// States lists every ladder state.
+func States() []State {
+	return []State{StateDraft, StatePlacing, StateOpen, StateDone, StateCanceled, StateFailed}
+}
+
+// Live reports whether the ladder still needs reconciling.
+func (s State) Live() bool { return s == StatePlacing || s == StateOpen || s == StateFailed }
+
+// Label is the Korean display name shown in Telegram.
+func (s State) Label() string {
+	switch s {
+	case StateDraft:
+		return "작성 중"
+	case StatePlacing:
+		return "전송 중"
+	case StateOpen:
+		return "대기"
+	case StateDone:
+		return "종료"
+	case StateCanceled:
+		return "취소"
+	case StateFailed:
+		return "중단"
+	}
+	return string(s)
+}
+
+// Basis is what the ladder's reference price was taken from.
+type Basis string
+
+const (
+	// BasisQuote anchors the ladder to the current market price.
+	BasisQuote Basis = "quote"
+	// BasisAverage anchors it to the position's average cost.
+	BasisAverage Basis = "average"
+	// BasisManual anchors it to a price the operator typed.
+	BasisManual Basis = "manual"
+)
+
+// Label is the Korean display name shown in Telegram.
+func (b Basis) Label() string {
+	switch b {
+	case BasisQuote:
+		return "현재가"
+	case BasisAverage:
+		return "평단"
+	case BasisManual:
+		return "직접 입력"
+	}
+	return string(b)
+}
