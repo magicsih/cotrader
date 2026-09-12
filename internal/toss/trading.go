@@ -25,19 +25,20 @@ type Account struct {
 	AccountType string `json:"accountType"`
 }
 
-// Holding is one position in the brokerage account.
-//
-// AveragePrice is not yet confirmed against the live API: the previous
-// implementation passed holdings through untyped, so the field name was never
-// pinned down. Callers must check HasAveragePrice and fall back to the last
-// trade rather than show a zero as an average cost.
+// Holding is one position in the brokerage account. The field names were read
+// off a live response: the list arrives wrapped under "items" and the average
+// cost is "averagePurchasePrice".
 type Holding struct {
 	Symbol       string          `json:"symbol"`
+	Name         string          `json:"name"`
 	Quantity     decimal.Decimal `json:"quantity"`
-	AveragePrice decimal.Decimal `json:"averagePrice"`
-	Currency     string          `json:"currency"`
-	// Raw is the untouched record, so the real field names can be read off a
-	// live response once instead of being guessed.
+	AveragePrice decimal.Decimal `json:"averagePurchasePrice"`
+	// LastPrice is the traded price Toss reports with the position, which is
+	// what the balance screen shows beside the quantity.
+	LastPrice decimal.Decimal `json:"lastPrice"`
+	Currency  string          `json:"currency"`
+	// Raw is the untouched record, kept so a future shape change can be read
+	// off a stored snapshot rather than guessed at.
 	Raw json.RawMessage `json:"-"`
 }
 

@@ -152,6 +152,9 @@ type Position struct {
 	// HasAverage is false when the exchange did not report an average cost,
 	// in which case no average-based price may be offered.
 	HasAverage bool
+	// LastPrice is what the venue last reported, for display only. Ladder
+	// prices always come from a fresh quote instead.
+	LastPrice decimal.Decimal
 }
 
 // Positions lists what can be sold on a venue, largest holding first.
@@ -169,6 +172,7 @@ func (s *Service) Positions(ctx context.Context, venue market.Venue) ([]Position
 			out = append(out, Position{
 				Symbol: holding.Symbol, Quantity: holding.Quantity,
 				AveragePrice: holding.AveragePrice, HasAverage: holding.HasAveragePrice(),
+				LastPrice: holding.LastPrice,
 			})
 		}
 		return sorted(out), nil
