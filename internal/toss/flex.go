@@ -42,30 +42,58 @@ func (i *id) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// listOf reads a list that Toss may return either bare or wrapped in an object
-// under a named field. Its order endpoint wraps, its account endpoint does not,
-// and the shape of the rest was never pinned down, so both are accepted.
-func listOf(raw json.RawMessage, field string) ([]json.RawMessage, error) {
+// listOf reads a list that Toss may return bare, or wrapped in an object under
+// some field. Its order endpoint wraps under "orders" and its account endpoint
+// does not wrap at all; the rest was never pinned down, because the previous
+// implementation passed those responses through untyped.
+//
+// When the expected field is absent but exactly one field holds an array, that
+// array is used and its name is reported, so an unfamiliar wrapper resolves
+// itself instead of failing the whole account read.
+func listOf(raw json.RawMessage, field string) ([]json.RawMessage, string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return nil, nil
+		return nil, "", nil
 	}
 	if trimmed[0] == '[' {
 		var records []json.RawMessage
 		if err := json.Unmarshal(trimmed, &records); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return records, nil
+		return records, "", nil
 	}
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &wrapper); err != nil {
-		return nil, err
+		return nil, "", fmt.Errorf("목록도 객체도 아닙니다")
 	}
-	inner, ok := wrapper[field]
-	if !ok {
-		return nil, fmt.Errorf("응답에 %q 목록이 없습니다", field)
+	if inner, ok := wrapper[field]; ok {
+		records, _, err := listOf(inner, field)
+		return records, field, err
 	}
-	return listOf(inner, field)
+
+	var arrays []string
+	for name, value := range wrapper {
+		if trimmedValue := bytes.TrimSpace(value); len(trimmedValue) > 0 && trimmedValue[0] == '[' {
+			arrays = append(arrays, name)
+		}
+	}
+	sort.Strings(arrays)
+	if len(arrays) == 1 {
+		records, _, err := listOf(wrapper[arrays[0]], arrays[0])
+		return records, arrays[0], err
+	}
+	return nil, "", fmt.Errorf("%q 목록이 없습니다. 응답의 항목: %v, 그중 배열: %v",
+		field, keysOf(wrapper), arrays)
+}
+
+// keysOf lists an object's field names. Names only, never values.
+func keysOf(object map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(object))
+	for name := range object {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // fieldNames reports the keys of one record, so an unfamiliar response shape

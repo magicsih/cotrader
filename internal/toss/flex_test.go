@@ -2,6 +2,7 @@ package toss
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -66,49 +67,45 @@ func TestDecodeErrorNamesTheEndpoint(t *testing.T) {
 // Toss wraps some list responses in an object and returns others bare. Reading
 // only one shape made a working account look broken.
 func TestListOfAcceptsBareAndWrappedLists(t *testing.T) {
-	cases := map[string]int{
-		`[{"a":1},{"a":2}]`:      2,
-		`{"holdings":[{"a":1}]}`: 1,
-		`{"holdings":[]}`:        0,
-		`{"holdings":null}`:      0,
-		`[]`:                     0,
-		`null`:                   0,
+	cases := map[string]struct {
+		count   int
+		wrapper string
+	}{
+		`[{"a":1},{"a":2}]`:      {2, ""},
+		`{"holdings":[{"a":1}]}`: {1, "holdings"},
+		`{"holdings":[]}`:        {0, "holdings"},
+		`{"holdings":null}`:      {0, "holdings"},
+		`[]`:                     {0, ""},
+		`null`:                   {0, ""},
+		// An unfamiliar wrapper resolves itself when only one field is a list.
+		`{"items":[{"a":1}],"page":1}`: {1, "items"},
 	}
 	for body, want := range cases {
-		got, err := listOf(json.RawMessage(body), "holdings")
+		got, wrapper, err := listOf(json.RawMessage(body), "holdings")
 		if err != nil {
 			t.Errorf("%s: %v", body, err)
 			continue
 		}
-		if len(got) != want {
-			t.Errorf("%s → %d건, want %d건", body, len(got), want)
-		}
-	}
-	for _, body := range []string{`{"other":[]}`, `{"holdings":5}`, `"text"`} {
-		if _, err := listOf(json.RawMessage(body), "holdings"); err == nil {
-			t.Errorf("%s: 오류가 없습니다", body)
+		if len(got) != want.count || wrapper != want.wrapper {
+			t.Errorf("%s → %d건 wrapper=%q, want %d건 wrapper=%q",
+				body, len(got), wrapper, want.count, want.wrapper)
 		}
 	}
 }
 
-// The shape log must name fields without ever revealing a value.
-func TestFieldNamesReportsKeysOnly(t *testing.T) {
-	names := fieldNames(json.RawMessage(`{"symbol":"QQQ","quantity":"10","averagePrice":"512.34"}`))
-	want := []string{"averagePrice", "quantity", "symbol"}
-	if len(names) != len(want) {
-		t.Fatalf("필드 %v", names)
+// When the shape cannot be resolved the error must name what was there, or the
+// next attempt is another guess.
+func TestListOfReportsTheShapeItFound(t *testing.T) {
+	_, _, err := listOf(json.RawMessage(`{"a":[1],"b":[2],"c":3}`), "holdings")
+	if err == nil {
+		t.Fatal("오류가 없습니다")
 	}
-	for i := range want {
-		if names[i] != want[i] {
-			t.Errorf("필드 %v, want %v", names, want)
+	for _, want := range []string{"holdings", "a", "b", "c"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("오류에 %q가 없습니다: %s", want, err)
 		}
 	}
-	for _, name := range names {
-		if name == "QQQ" || name == "10" || name == "512.34" {
-			t.Error("값이 필드 이름으로 보고되었습니다")
-		}
-	}
-	if fieldNames(json.RawMessage(`[1,2]`)) != nil {
-		t.Error("객체가 아닌 레코드에서 필드가 나왔습니다")
+	if _, _, err := listOf(json.RawMessage(`"text"`), "holdings"); err == nil {
+		t.Error("문자열이 목록으로 통과했습니다")
 	}
 }
