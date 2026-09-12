@@ -105,3 +105,29 @@ func TestWhenSaysSoWhenThereIsNoTime(t *testing.T) {
 		t.Errorf("When = %q, want 09/12 10:02:03 KST", got)
 	}
 }
+
+// A header sits over its own column, so it must take the same alignment as the
+// figures beneath it or the numbers stop lining up.
+func TestTableHeadersShareTheirColumnAlignment(t *testing.T) {
+	table := Table([]string{"#", "가격", "수량"}, [][]string{{"1", "205000", "2"}})
+	cells, ok := table["cells"].([]any)
+	if !ok || len(cells) != 2 {
+		t.Fatalf("표 구조 %v", table["cells"])
+	}
+	for row, line := range cells {
+		columns, ok := line.([]any)
+		if !ok {
+			t.Fatalf("%d행 구조 %v", row, line)
+		}
+		for column, cell := range columns {
+			want := "right"
+			if column == 0 {
+				want = "left"
+			}
+			got := cell.(map[string]any)["align"]
+			if got != want {
+				t.Errorf("%d행 %d열 정렬 %v, want %s", row, column, got, want)
+			}
+		}
+	}
+}

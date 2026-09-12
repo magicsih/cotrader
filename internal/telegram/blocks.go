@@ -40,28 +40,33 @@ func Details(summary string, blocks []Block) Block {
 }
 
 // Table lays out rows with the first column left aligned and the rest right
-// aligned, which is how numbers stay readable on a phone.
+// aligned, which is how numbers stay readable on a phone. A header sits over
+// its own column, so it takes that column's alignment too.
 func Table(headers []string, rows [][]string) Block {
 	cells := make([]any, 0, len(rows)+1)
 	head := make([]any, 0, len(headers))
-	for _, text := range headers {
+	for i, text := range headers {
 		head = append(head, map[string]any{
-			"text": text, "is_header": true, "align": "left", "valign": "middle",
+			"text": text, "is_header": true, "align": columnAlign(i), "valign": "middle",
 		})
 	}
 	cells = append(cells, head)
 	for _, row := range rows {
 		line := make([]any, 0, len(row))
 		for i, text := range row {
-			align := "right"
-			if i == 0 {
-				align = "left"
-			}
-			line = append(line, map[string]any{"text": text, "align": align, "valign": "middle"})
+			line = append(line, map[string]any{"text": text, "align": columnAlign(i), "valign": "middle"})
 		}
 		cells = append(cells, line)
 	}
 	return Block{"type": "table", "is_compact": true, "is_striped": true, "cells": cells}
+}
+
+// columnAlign keeps the label column on the left and every figure on the right.
+func columnAlign(column int) string {
+	if column == 0 {
+		return "left"
+	}
+	return "right"
 }
 
 // Action is a button that sends data back to the bot.

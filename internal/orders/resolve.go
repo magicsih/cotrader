@@ -24,7 +24,7 @@ func (e *Executor) ResolveFound(ctx context.Context, orderID, brokerID string) e
 		return fmt.Errorf("확인이 필요한 주문이 아닙니다")
 	}
 	if brokerID == "" {
-		return fmt.Errorf("증권사 주문 번호가 비었습니다")
+		return fmt.Errorf("증권사 주문 번호가 비어 있습니다")
 	}
 	switch existing, err := e.DB.OrderByBrokerID(ctx, brokerID); {
 	case err == nil && existing.ID != order.ID:
@@ -45,7 +45,7 @@ func (e *Executor) ResolveFound(ctx context.Context, orderID, brokerID string) e
 		return fmt.Errorf("증권사 주문의 종목·방향이 다릅니다: %s %s", state.Symbol, state.Side.Label())
 	}
 	if !state.Quantity.Equal(order.Quantity) || !state.Price.Equal(order.Price) {
-		return fmt.Errorf("증권사 주문의 수량·가격이 다릅니다: %s × %s", state.Price, state.Quantity)
+		return fmt.Errorf("증권사 주문의 가격·수량이 다릅니다: 가격 %s · 수량 %s", state.Price, state.Quantity)
 	}
 
 	order.BrokerID, order.Reason = brokerID, ""
