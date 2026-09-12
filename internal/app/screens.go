@@ -96,10 +96,16 @@ func (a *App) balanceScreen(ctx context.Context) (screen, error) {
 				if holding.HasAveragePrice() {
 					average = telegram.Number(holding.AveragePrice)
 				}
-				rows = append(rows, []string{holding.Symbol, telegram.Number(holding.Quantity), average})
+				last := "확인 불가"
+				if holding.LastPrice.Sign() > 0 {
+					last = telegram.Number(holding.LastPrice)
+				}
+				rows = append(rows, []string{
+					holding.Symbol, telegram.Number(holding.Quantity), average, last,
+				})
 			}
 			if len(rows) > 0 {
-				blocks = append(blocks, telegram.Table([]string{"종목", "수량", "평단"}, rows))
+				blocks = append(blocks, telegram.Table([]string{"종목", "수량", "평단", "현재가"}, rows))
 			}
 		}
 	}

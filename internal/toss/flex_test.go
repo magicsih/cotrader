@@ -109,3 +109,34 @@ func TestListOfReportsTheShapeItFound(t *testing.T) {
 		t.Error("문자열이 목록으로 통과했습니다")
 	}
 }
+
+// The holding field names were read off a live response on 2026-09-12: the
+// list arrives wrapped under "items" and the average cost is
+// "averagePurchasePrice". Decoding the names we assumed instead left every
+// average at zero, which hid the average-price option from the operator.
+func TestHoldingDecodesTheLiveFieldNames(t *testing.T) {
+	body := `{"items":[{"symbol":"QQQ","name":"인베스코 QQQ","quantity":"10.5",
+		"averagePurchasePrice":"512.34","lastPrice":"530.10","currency":"USD",
+		"cost":"5379.57","marketValue":"5566.05","marketCountry":"US",
+		"profitLoss":"186.48","dailyProfitLoss":"12.00"}]}`
+	records, wrapper, err := listOf(json.RawMessage(body), "holdings")
+	if err != nil {
+		t.Fatalf("목록 해석 실패: %v", err)
+	}
+	if wrapper != "items" || len(records) != 1 {
+		t.Fatalf("감싼 이름 %q, 레코드 %d건", wrapper, len(records))
+	}
+	var holding Holding
+	if err := json.Unmarshal(records[0], &holding); err != nil {
+		t.Fatalf("보유 파싱 실패: %v", err)
+	}
+	if holding.Symbol != "QQQ" || holding.Quantity.String() != "10.5" {
+		t.Errorf("종목 %q 수량 %s", holding.Symbol, holding.Quantity)
+	}
+	if !holding.HasAveragePrice() || holding.AveragePrice.String() != "512.34" {
+		t.Errorf("평단 %s (제공 %v)", holding.AveragePrice, holding.HasAveragePrice())
+	}
+	if holding.LastPrice.String() != "530.1" {
+		t.Errorf("현재가 %s", holding.LastPrice)
+	}
+}
