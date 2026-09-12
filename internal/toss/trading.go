@@ -254,7 +254,7 @@ func (c *Client) Place(ctx context.Context, req broker.OrderRequest) (string, er
 func (c *Client) Cancel(ctx context.Context, brokerID string) error {
 	_, err := c.request(ctx, call{
 		method: http.MethodPost, path: "/api/v1/orders/" + url.PathEscape(brokerID) + "/cancel",
-		group: groupOrder, account: true, body: map[string]string{},
+		group: groupOrder, account: true, body: map[string]string{}, reducesRisk: true,
 	})
 	return err
 }

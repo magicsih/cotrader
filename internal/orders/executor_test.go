@@ -640,3 +640,136 @@ func TestAFailedListingChangesNothing(t *testing.T) {
 		}
 	}
 }
+
+// An unresolved order blocks its whole market, so the operator must be able to
+// settle it from the app. Matching by hand only works if every field agrees.
+func TestResolveFoundAdoptsOnlyAMatchingOrder(t *testing.T) {
+	detail := func(symbol string, side market.Side, price, quantity string) *broker.OrderState {
+		return &broker.OrderState{
+			BrokerID: "手-1", Symbol: symbol, Side: side,
+			Price: dec(t, price), Quantity: dec(t, quantity), Status: broker.Pending,
+			FilledQuantity: decimal.Zero, FilledAmount: decimal.Zero,
+		}
+	}
+	mismatches := map[string]*broker.OrderState{
+		"다른 종목": detail("KRW-BTC", market.Sell, "205000", "2"),
+		"다른 방향": detail("KRW-SOL", market.Buy, "205000", "2"),
+		"다른 가격": detail("KRW-SOL", market.Sell, "206000", "2"),
+		"다른 수량": detail("KRW-SOL", market.Sell, "205000", "3"),
+	}
+	for name, state := range mismatches {
+		t.Run(name, func(t *testing.T) {
+			f := &fake{place: func(broker.OrderRequest) (string, error) {
+				return "", broker.Unresolved("toss-transport-unavailable")
+			}}
+			executor, db, batch, orders := fixture(t, f)
+			mustSubmit(t, executor, batch.ID)
+			f.order = func(string) (*broker.OrderState, error) { return state, nil }
+
+			if err := executor.ResolveFound(context.Background(), orders[0].ID, "手-1"); err == nil {
+				t.Error("일치하지 않는 주문이 연결되었습니다")
+			}
+			stored, _ := db.LiveOrder(context.Background(), orders[0].ID)
+			if stored.BrokerID != "" || stored.Status != broker.Unknown {
+				t.Errorf("상태가 바뀌었습니다: %q %s", stored.BrokerID, stored.Status)
+			}
+		})
+	}
+
+	f := &fake{place: func(broker.OrderRequest) (string, error) {
+		return "", broker.Unresolved("toss-transport-unavailable")
+	}}
+	executor, db, batch, orders := fixture(t, f)
+	mustSubmit(t, executor, batch.ID)
+	f.order = func(string) (*broker.OrderState, error) {
+		return detail("KRW-SOL", market.Sell, "205000", "2"), nil
+	}
+	if err := executor.ResolveFound(context.Background(), orders[0].ID, "手-1"); err != nil {
+		t.Fatalf("일치하는 주문 연결 실패: %v", err)
+	}
+	stored, _ := db.LiveOrder(context.Background(), orders[0].ID)
+	if stored.BrokerID != "手-1" || stored.Status != broker.Pending {
+		t.Errorf("연결 결과 %q %s", stored.BrokerID, stored.Status)
+	}
+	// Once settled the market opens again.
+	if _, err := executor.Submit(context.Background(), batch.ID); err != nil {
+		t.Errorf("정리 후에도 전송이 막혔습니다: %v", err)
+	}
+}
+
+// One exchange order must never answer for two of ours.
+func TestResolveFoundRefusesAnAlreadyUsedIdentifier(t *testing.T) {
+	f := &fake{}
+	executor, _, batch, orders := fixture(t, f)
+	sent := 0
+	f.place = func(req broker.OrderRequest) (string, error) {
+		sent++
+		if sent == 1 {
+			return "broker-taken", nil
+		}
+		return "", broker.Unresolved("toss-transport-unavailable")
+	}
+	mustSubmit(t, executor, batch.ID)
+	if err := executor.ResolveFound(context.Background(), orders[1].ID, "broker-taken"); err == nil {
+		t.Error("이미 사용 중인 증권사 주문 번호가 연결되었습니다")
+	}
+}
+
+// Declaring an order missing is the operator's assertion, and the only way out
+// on an exchange that cannot look one up by our identifier.
+func TestResolveMissingClosesTheOrderAndFreesTheMarket(t *testing.T) {
+	f := &fake{place: func(broker.OrderRequest) (string, error) {
+		return "", broker.Unresolved("toss-transport-unavailable")
+	}}
+	executor, db, batch, orders := fixture(t, f)
+	mustSubmit(t, executor, batch.ID)
+
+	if err := executor.ResolveMissing(context.Background(), orders[0].ID); err != nil {
+		t.Fatalf("정리 실패: %v", err)
+	}
+	stored, _ := db.LiveOrder(context.Background(), orders[0].ID)
+	if stored.Status != broker.Canceled || stored.Reason == "" {
+		t.Errorf("상태 %s, 사유 %q", stored.Status, stored.Reason)
+	}
+	if _, err := executor.Submit(context.Background(), batch.ID); err != nil {
+		t.Errorf("정리 후에도 전송이 막혔습니다: %v", err)
+	}
+	if err := executor.ResolveMissing(context.Background(), orders[0].ID); err == nil {
+		t.Error("이미 정리된 주문이 다시 정리되었습니다")
+	}
+}
+
+// A process that died between writing the last fill and closing the ladder
+// must still close it, even though no active order brings it back.
+func TestReconcileClosesALadderLeftOpenByACrash(t *testing.T) {
+	f := &fake{}
+	executor, db, batch, orders := fixture(t, f)
+	mustSubmit(t, executor, batch.ID)
+
+	// Stand in for the crash: every order reaches a terminal state without
+	// settle ever running.
+	for _, order := range orders {
+		stored, err := db.LiveOrder(context.Background(), order.ID)
+		if err != nil {
+			t.Fatalf("주문 조회 실패: %v", err)
+		}
+		stored.Status = broker.Filled
+		stored.FilledQuantity, stored.NotifiedQuantity = stored.Quantity, stored.Quantity
+		stored.FilledAmount = stored.Quantity.Mul(stored.Price)
+		if err := db.UpdateOrder(context.Background(), &stored.Order); err != nil {
+			t.Fatalf("주문 갱신 실패: %v", err)
+		}
+	}
+	loaded, _ := db.Ladder(context.Background(), batch.ID)
+	if loaded.State != ladder.StateOpen {
+		t.Fatalf("사전 상태 %s", loaded.State)
+	}
+
+	if err := executor.Reconcile(context.Background()); err != nil {
+		t.Fatalf("대조 실패: %v", err)
+	}
+	loaded, _ = db.Ladder(context.Background(), batch.ID)
+	if loaded.State != ladder.StateDone {
+		t.Errorf("사다리 상태 %s, want DONE", loaded.State)
+	}
+}

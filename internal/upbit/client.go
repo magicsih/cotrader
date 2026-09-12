@@ -175,7 +175,7 @@ func (c *Client) request(ctx context.Context, method, path string, params Params
 			return nil, broker.Fail("upbit-private-endpoint-disabled")
 		}
 		if mutation {
-			if err := c.allowMutation(path, params); err != nil {
+			if err := c.allowMutation(method, path, params); err != nil {
 				return nil, err
 			}
 		}
@@ -235,7 +235,14 @@ func (c *Client) request(ctx context.Context, method, path string, params Params
 
 // allowMutation refuses a state change the operator has not enabled. Upbit
 // venues are gated one at a time so KRW can trade while USDT stays frozen.
-func (c *Client) allowMutation(path string, params Params) error {
+//
+// A cancel is always allowed: the switch exists to stop new exposure, and
+// refusing to withdraw an order would strand it at the exchange exactly when
+// the operator wants it gone.
+func (c *Client) allowMutation(method, path string, params Params) error {
+	if method == http.MethodDelete && path == "/v1/order" {
+		return nil
+	}
 	if path == TransferPath {
 		if !c.settings.TransfersEnabled {
 			return broker.Fail("upbit-transfers-disabled")

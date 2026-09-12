@@ -439,3 +439,24 @@ func TestOrderbooksRejectsUnknownMarkets(t *testing.T) {
 		t.Error("검증 전에 요청이 나갔습니다")
 	}
 }
+
+// Cancelling only removes exposure, so it stays available even with every
+// market switched off.
+func TestCancelWorksWhileOrdersAreDisabled(t *testing.T) {
+	client, seen := server(t, settings(), func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("예상하지 못한 메서드 %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"uuid": "broker-1"})
+	})
+	if err := client.Cancel(context.Background(), "broker-1"); err != nil {
+		t.Fatalf("주문이 꺼진 상태에서 취소가 거절되었습니다: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("요청 %d건", len(*seen))
+	}
+	// New exposure is still refused.
+	if _, err := client.Place(context.Background(), order(t)); err == nil {
+		t.Error("주문이 꺼진 상태에서 신규 주문이 허용되었습니다")
+	}
+}

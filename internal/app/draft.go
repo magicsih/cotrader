@@ -280,6 +280,28 @@ func (a *App) commitEntry(draft *store.Ladder) error {
 	return nil
 }
 
+// prompt records what a typed reply will be applied to. A reply is answered
+// once and only against the thing that asked for it.
+type prompt struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// Kinds of typed reply the bot ever asks for.
+const (
+	promptSymbol   = "symbol"
+	promptBrokerID = "broker_id"
+)
+
+// ask puts a question that expects a typed answer.
+func (a *App) ask(ctx context.Context, kind, id, question string) error {
+	if err := a.DB.PutState(ctx, replyPromptKey, prompt{Kind: kind, ID: id}); err != nil {
+		return err
+	}
+	_, err := a.Bot.Ask(ctx, question)
+	return err
+}
+
 // askSymbol prompts for a ticker with a reply keyboard and remembers which
 // draft the answer belongs to.
 func (a *App) askSymbol(ctx context.Context, messageID int64, draft *store.Ladder) error {
@@ -289,35 +311,56 @@ func (a *App) askSymbol(ctx context.Context, messageID int64, draft *store.Ladde
 			return err
 		}
 	}
-	if err := a.DB.PutState(ctx, replyPromptKey, draft.ID); err != nil {
-		return err
-	}
 	example := "AAPL"
 	if draft.Venue.IsUpbit() {
 		example = draft.Venue.Currency() + "-SOL"
 	}
-	_, err := a.Bot.Ask(ctx, fmt.Sprintf("종목 코드를 답장으로 보내주세요. 예: %s", example))
-	return err
+	return a.ask(ctx, promptSymbol, draft.ID,
+		fmt.Sprintf("종목 코드를 답장으로 보내주세요. 예: %s", example))
 }
 
-// onReply handles the one free-text answer the flow asks for: a ticker that is
-// not already held, which a number pad cannot take.
+// onReply applies a typed answer to whatever asked for it.
+//
+// The pending question is cleared first, whatever happens next. A question
+// that stayed pending would let an unrelated message land on a ladder that had
+// since been sent, resetting an order already working at an exchange.
 func (a *App) onReply(ctx context.Context, message *telegram.Message, text string) error {
-	var pending string
-	if _, err := a.DB.GetState(ctx, replyPromptKey, &pending); err != nil {
-		return err
-	}
-	if pending == "" {
-		return nil
-	}
-	draft, err := a.DB.Ladder(ctx, pending)
+	var pending prompt
+	found, err := a.DB.GetState(ctx, replyPromptKey, &pending)
 	if err != nil {
 		return err
 	}
-	if err := a.DB.PutState(ctx, replyPromptKey, ""); err != nil {
+	if !found || pending.ID == "" {
+		return nil
+	}
+	if err := a.DB.PutState(ctx, replyPromptKey, prompt{}); err != nil {
 		return err
 	}
-	symbol := strings.ToUpper(strings.TrimSpace(text))
+	_ = message
+
+	answer := strings.TrimSpace(text)
+	switch pending.Kind {
+	case promptSymbol:
+		return a.applySymbol(ctx, pending.ID, strings.ToUpper(answer))
+	case promptBrokerID:
+		return a.applyBrokerID(ctx, pending.ID, answer)
+	}
+	return nil
+}
+
+// applySymbol sets a ticker on the draft that asked for one.
+func (a *App) applySymbol(ctx context.Context, ladderID, symbol string) error {
+	draft, err := a.DB.Ladder(ctx, ladderID)
+	if err != nil {
+		// The draft was abandoned and pruned; there is nothing to answer.
+		return nil
+	}
+	// Only a draft still waiting for a symbol may be changed. By the time a
+	// ladder is sent its symbol is what its orders were placed against.
+	if draft.State != ladder.StateDraft || draft.Step() != "symbol" {
+		return a.show(ctx, draftMessage(draft), a.errorScreen(
+			fmt.Errorf("이 주문은 이미 종목이 정해졌습니다. 입력을 반영하지 않았습니다")))
+	}
 	if err := market.ValidateSymbol(draft.Venue, symbol); err != nil {
 		return a.show(ctx, draftMessage(draft), a.errorScreen(err))
 	}
@@ -326,8 +369,15 @@ func (a *App) onReply(ctx context.Context, message *telegram.Message, text strin
 	if err := a.DB.SaveLadder(ctx, draft); err != nil {
 		return err
 	}
-	_ = message
 	return a.drawDraft(ctx, draftMessage(draft), draft)
+}
+
+// applyBrokerID attaches an exchange order the operator matched by hand.
+func (a *App) applyBrokerID(ctx context.Context, orderID, brokerID string) error {
+	if err := a.Orders.ResolveFound(ctx, orderID, brokerID); err != nil {
+		return a.show(ctx, 0, a.errorScreen(err))
+	}
+	return a.sendPaged(ctx, 0, 0, a.ordersScreen)
 }
 
 func draftMessage(draft *store.Ladder) int64 {

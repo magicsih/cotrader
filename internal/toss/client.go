@@ -225,6 +225,10 @@ type call struct {
 	// account adds the brokerage account header. Every order and balance call
 	// needs it; market data does not.
 	account bool
+	// reducesRisk marks a write that can only remove exposure. The order
+	// switch exists to stop new exposure, so blocking a cancel would strand
+	// live orders at the exchange exactly when the operator wants them gone.
+	reducesRisk bool
 }
 
 // errorCode is the shape of a Toss error code. Anything else is discarded so a
@@ -239,7 +243,7 @@ func (c *Client) request(ctx context.Context, spec call) (json.RawMessage, error
 	write := spec.method != http.MethodGet
 	// Guard the transport itself, so an endpoint added later cannot bypass the
 	// operator's switch just by being called from somewhere new.
-	if write && !c.settings.OrdersEnabled(market.Toss) {
+	if write && !spec.reducesRisk && !c.settings.OrdersEnabled(market.Toss) {
 		return nil, broker.Fail("toss-orders-disabled")
 	}
 	if spec.group == "" {

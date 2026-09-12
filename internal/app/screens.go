@@ -188,6 +188,16 @@ func (a *App) ordersScreen(ctx context.Context, page int) (screen, error) {
 			row = append(row, telegram.Action("나머지 전송", "go:"+compact(batch.ID)))
 		}
 		keyboard = append(keyboard, row)
+		// An unresolved order blocks every new order in its market, so the way
+		// out of it belongs right here rather than in a manual database edit.
+		for _, order := range rows {
+			if !order.Status.Unresolved() {
+				continue
+			}
+			keyboard = append(keyboard, telegram.Row(
+				telegram.Action(fmt.Sprintf("%d단계 · 거래소에 있음", order.Rung+1), "rf:"+compact(order.ID)),
+				telegram.Action(fmt.Sprintf("%d단계 · 없음", order.Rung+1), "rm:"+compact(order.ID))))
+		}
 	}
 	keyboard = append(keyboard, telegram.Pager("orders", page, len(ladders))...)
 	keyboard = append(keyboard, telegram.Row(telegram.Action("전체 취소", "xall")))
@@ -217,7 +227,9 @@ func ladderSummary(batch *store.Ladder, rows []*store.Order) string {
 		summary += " · 평균 " + telegram.Number(amount.DivRound(filled, 8))
 	}
 	if unresolved > 0 {
-		summary += fmt.Sprintf("\n확인 필요 %d건 — 거래소 앱에서 직접 대조하세요", unresolved)
+		summary += fmt.Sprintf(
+			"\n확인 필요 %d건 — 거래소 앱에서 대조한 뒤 아래 버튼으로 정리하세요.\n"+
+				"정리하기 전까지 이 시장의 새 주문이 막힙니다.", unresolved)
 	}
 	if batch.Reason != "" {
 		summary += "\n" + batch.Reason

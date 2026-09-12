@@ -36,7 +36,9 @@ func TestPublicBoundary(t *testing.T) {
 			}
 		}
 		name := path.Base(file)
-		if name == ".env.example" {
+		// The example environment file carries no values, and the embedded
+		// schema is source code rather than operator data.
+		if name == ".env.example" || strings.HasPrefix(file, "internal/store/migrations/") {
 			continue
 		}
 		for _, suffix := range secretSuffixes {

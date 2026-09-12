@@ -23,15 +23,11 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(active) == 0 {
-		return nil
-	}
 	byVenue := map[market.Venue][]*store.LiveOrder{}
 	for _, order := range active {
 		byVenue[order.Venue] = append(byVenue[order.Venue], order)
 	}
 
-	touched := map[string]bool{}
 	var failures []error
 	for venue, list := range byVenue {
 		exchange, ok := e.Exchanges[venue]
@@ -52,18 +48,19 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 		for _, order := range list {
 			if err := e.refresh(ctx, exchange, order, index); err != nil {
 				failures = append(failures, err)
-				continue
 			}
-			touched[order.LadderID] = true
 		}
 	}
 
-	for ladderID := range touched {
-		batch, err := e.DB.Ladder(ctx, ladderID)
-		if err != nil {
-			failures = append(failures, err)
-			continue
-		}
+	// Every live ladder is settled, not just the ones touched this cycle. A
+	// process that died between writing the last fill and closing the ladder
+	// would otherwise leave it open for good, since it no longer has an active
+	// order to bring it back here.
+	live, err := e.DB.LiveLadders(ctx)
+	if err != nil {
+		return errors.Join(append(failures, err)...)
+	}
+	for _, batch := range live {
 		if err := e.settle(ctx, batch); err != nil {
 			failures = append(failures, err)
 		}

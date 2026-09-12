@@ -358,3 +358,72 @@ func TestKeypadBuildsANumberAndCommitsOnConfirm(t *testing.T) {
 		t.Error("입력 상태가 남아 있습니다")
 	}
 }
+
+// A pending question must never reach a ladder that has since been sent.
+// Resetting a live ladder's symbol would make every working rung look like it
+// belonged to a different market and strand the whole venue.
+func TestUnansweredSymbolPromptCannotTouchASentLadder(t *testing.T) {
+	a, db, _ := harness(t)
+	ctx := context.Background()
+	draft := draftAt(t, db, "symbol")
+
+	if err := a.askSymbol(ctx, 1234, draft); err != nil {
+		t.Fatalf("종목 질문 실패: %v", err)
+	}
+	// The operator ignores the prompt, finishes with buttons, and sends.
+	draft.Symbol, draft.Basis, draft.BasePrice = "KRW-SOL", ladder.BasisQuote, dec(t, "200000")
+	draft.StartPct, draft.EndPct, draft.Rungs, draft.Total = dec(t, "0.025"), dec(t, "0.1"), 10, dec(t, "20")
+	draft.State = ladder.StateOpen
+	if err := db.SaveLadder(ctx, draft); err != nil {
+		t.Fatalf("사다리 저장 실패: %v", err)
+	}
+
+	// Any later message would otherwise be read as the answer.
+	if err := a.onReply(ctx, &telegram.Message{MessageID: 9}, "hello"); err != nil {
+		t.Fatalf("답장 처리 실패: %v", err)
+	}
+	loaded, err := db.Ladder(ctx, draft.ID)
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	if loaded.Symbol != "KRW-SOL" || loaded.State != ladder.StateOpen {
+		t.Errorf("전송된 사다리가 바뀌었습니다: %q %s", loaded.Symbol, loaded.State)
+	}
+	if loaded.Rungs != 10 || !loaded.Total.Equal(dec(t, "20")) {
+		t.Errorf("설정이 초기화되었습니다: %d분할 %s", loaded.Rungs, loaded.Total)
+	}
+}
+
+// A question is answered once. Whatever happens to the answer, the prompt is
+// gone afterwards so a later message lands nowhere.
+func TestPromptIsClearedByTheFirstReply(t *testing.T) {
+	a, db, _ := harness(t)
+	ctx := context.Background()
+	draft := draftAt(t, db, "symbol")
+	if err := a.askSymbol(ctx, 1234, draft); err != nil {
+		t.Fatalf("종목 질문 실패: %v", err)
+	}
+	if err := a.onReply(ctx, &telegram.Message{MessageID: 9}, "KRW-SOL"); err != nil {
+		t.Fatalf("답장 처리 실패: %v", err)
+	}
+	loaded, _ := db.Ladder(ctx, draft.ID)
+	if loaded.Symbol != "KRW-SOL" {
+		t.Fatalf("첫 답장이 반영되지 않았습니다: %q", loaded.Symbol)
+	}
+
+	var pending prompt
+	found, err := db.GetState(ctx, replyPromptKey, &pending)
+	if err != nil {
+		t.Fatalf("질문 상태 조회 실패: %v", err)
+	}
+	if found && pending.ID != "" {
+		t.Errorf("답장 후에도 질문이 남아 있습니다: %+v", pending)
+	}
+	if err := a.onReply(ctx, &telegram.Message{MessageID: 10}, "KRW-BTC"); err != nil {
+		t.Fatalf("두 번째 답장 처리 실패: %v", err)
+	}
+	loaded, _ = db.Ladder(ctx, draft.ID)
+	if loaded.Symbol != "KRW-SOL" {
+		t.Errorf("두 번째 답장이 반영되었습니다: %q", loaded.Symbol)
+	}
+}

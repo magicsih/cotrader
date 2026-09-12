@@ -136,6 +136,11 @@ func (a *App) onButton(ctx context.Context, query *telegram.CallbackQuery) error
 		return a.cancelOneOrder(ctx, messageID, parts[1])
 	case "xall":
 		return a.cancelEverything(ctx, messageID)
+	case "rf", "rm", "rmy":
+		if len(parts) != 2 {
+			return nil
+		}
+		return a.resolveButton(ctx, messageID, parts[0], parts[1])
 	case "t":
 		return a.transferButton(ctx, messageID, parts[1:])
 	}

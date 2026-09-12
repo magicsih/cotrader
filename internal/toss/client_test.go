@@ -195,19 +195,16 @@ func TestExpiredTokenOnAnOrderDoesNotResend(t *testing.T) {
 	}
 }
 
-// The switch guards the transport, not just Place, so any future write path is
-// covered by the same gate.
-func TestWritesAreBlockedWhileOrdersAreDisabled(t *testing.T) {
-	st := &stub{handler: func(w http.ResponseWriter, _ *http.Request, _ string) {
+// The switch guards the transport, not just Place, so a write path added later
+// is covered by the same gate unless it is explicitly marked risk reducing.
+func TestNewExposureIsBlockedWhileOrdersAreDisabled(t *testing.T) {
+	st := &stub{lifetime: 3600, handler: func(w http.ResponseWriter, _ *http.Request, _ string) {
 		t.Error("차단되어야 할 요청이 전송되었습니다")
 	}}
 	client := newClient(t, settings(false), st)
 
 	if _, err := client.Place(context.Background(), placeRequest(t)); code(t, err) != "toss-orders-disabled" {
 		t.Error("주문이 차단되지 않았습니다")
-	}
-	if err := client.Cancel(context.Background(), "broker-1"); code(t, err) != "toss-orders-disabled" {
-		t.Error("취소가 차단되지 않았습니다")
 	}
 	_, err := client.request(context.Background(), call{method: http.MethodPost, path: "/api/v1/anything"})
 	if code(t, err) != "toss-orders-disabled" {
@@ -452,5 +449,28 @@ func TestCalendarFindsTheCurrentSession(t *testing.T) {
 		if found != c.ok || name != c.name {
 			t.Errorf("%s: %q, %v; want %q, %v", c.at, name, found, c.name, c.ok)
 		}
+	}
+}
+
+// The order switch exists to stop new exposure. A cancel only removes it, so
+// refusing one would strand a live order at the broker exactly when the
+// operator has decided to stop trading.
+func TestCancelWorksWhileOrdersAreDisabled(t *testing.T) {
+	st := &stub{lifetime: 3600, handler: func(w http.ResponseWriter, r *http.Request, _ string) {
+		if !strings.HasSuffix(r.URL.Path, "/cancel") {
+			t.Errorf("예상하지 못한 경로 %s", r.URL.Path)
+		}
+		ok(w, map[string]string{"orderId": "broker-1"})
+	}}
+	client := newClient(t, settings(false), st)
+	if err := client.Cancel(context.Background(), "broker-1"); err != nil {
+		t.Fatalf("주문이 꺼진 상태에서 취소가 거절되었습니다: %v", err)
+	}
+	if st.requests.Load() != 1 {
+		t.Errorf("취소 요청 %d회", st.requests.Load())
+	}
+	// New exposure is still refused.
+	if _, err := client.Place(context.Background(), placeRequest(t)); err == nil {
+		t.Error("주문이 꺼진 상태에서 신규 주문이 허용되었습니다")
 	}
 }

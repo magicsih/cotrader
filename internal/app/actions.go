@@ -146,3 +146,46 @@ func (a *App) afterCancel(ctx context.Context, messageID int64, result orders.Ca
 		telegram.Action("⌂ 메뉴", "nav:menu:0"),
 	}}))
 }
+
+// resolveButton walks the operator through settling an order whose fate we
+// could not read.
+func (a *App) resolveButton(ctx context.Context, messageID int64, action, short string) error {
+	id, ok := expand(short)
+	if !ok {
+		return nil
+	}
+	order, err := a.DB.LiveOrder(ctx, id)
+	if err != nil {
+		return a.show(ctx, messageID, a.errorScreen(err))
+	}
+	if !order.Status.Unresolved() {
+		return a.show(ctx, messageID, a.errorScreen(
+			fmt.Errorf("확인이 필요한 주문이 아닙니다")))
+	}
+	where := fmt.Sprintf("%s %s %s %d단계 · %s × %s",
+		order.Venue.Label(), order.Symbol, order.Side.Label(), order.Rung+1,
+		telegram.Number(order.Price), telegram.Number(order.Quantity))
+
+	switch action {
+	case "rf":
+		return a.ask(ctx, promptBrokerID, id,
+			"거래소 앱에서 확인한 주문 번호를 답장으로 보내주세요.\n"+where+
+				"\n\n종목·방향·수량·가격이 모두 일치할 때만 연결합니다.")
+	case "rm":
+		return a.show(ctx, messageID, view([]telegram.Block{
+			telegram.Heading("거래소에 주문이 없습니까?"),
+			telegram.Paragraph(where),
+			telegram.Paragraph(
+				"거래소에 이 주문이 없다는 것을 직접 확인했을 때만 누르세요. " +
+					"주문이 실제로 살아 있는데 없다고 표시하면 앱이 그 주문을 더 이상 추적하지 않습니다."),
+		}, telegram.Keyboard{
+			{telegram.Action("확인했습니다 · 미전송으로 정리", "rmy:"+short)},
+			{telegram.Action("주문 현황", "nav:orders:0"), telegram.Action("⌂ 메뉴", "nav:menu:0")},
+		}))
+	default:
+		if err := a.Orders.ResolveMissing(ctx, id); err != nil {
+			return a.show(ctx, messageID, a.errorScreen(err))
+		}
+		return a.sendPaged(ctx, messageID, 0, a.ordersScreen)
+	}
+}

@@ -425,3 +425,15 @@ func (d *DB) LiveOrder(ctx context.Context, id string) (*LiveOrder, error) {
 	live.BrokerID = brokerID.String
 	return &live, nil
 }
+
+// OrderByBrokerID finds the order already claiming an exchange identifier, so
+// one exchange order can never be matched to two of ours.
+func (d *DB) OrderByBrokerID(ctx context.Context, brokerID string) (*Order, error) {
+	var o Order
+	row := d.sql.QueryRowContext(ctx,
+		`SELECT `+orderColumns+` FROM ladder_orders WHERE broker_id = ?`, brokerID)
+	if err := scanOrder(row, &o); err != nil {
+		return nil, err
+	}
+	return &o, nil
+}

@@ -17,6 +17,8 @@ logs/
 !.env.example
 *.env
 *.sql
+# The embedded schema is source, not operator data.
+!internal/store/migrations/*.sql
 *.sqlite*
 *.db
 *.csv
