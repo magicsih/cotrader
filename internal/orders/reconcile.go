@@ -9,7 +9,6 @@ import (
 	"github.com/magicsih/cotrader/internal/ladder"
 	"github.com/magicsih/cotrader/internal/market"
 	"github.com/magicsih/cotrader/internal/store"
-	"github.com/shopspring/decimal"
 )
 
 // Reconcile brings every working order in line with what its exchange reports.
@@ -194,34 +193,28 @@ func (e *Executor) reportFill(ctx context.Context, order *store.LiveOrder) error
 	return e.DB.UpdateOrder(ctx, &order.Order)
 }
 
-// settle closes a ladder once none of its rungs can change any more.
+// settle closes a ladder once none of its rungs can change any more, and
+// reports what it actually achieved rather than what the preview predicted.
 func (e *Executor) settle(ctx context.Context, batch *store.Ladder) error {
 	all, err := e.DB.Orders(ctx, batch.ID)
 	if err != nil {
 		return err
 	}
-	filled, amount := decimal.Zero, decimal.Zero
 	for _, order := range all {
 		if order.Status.Active() {
 			return nil
 		}
-		filled = filled.Add(order.FilledQuantity)
-		amount = amount.Add(order.FilledAmount)
 	}
 	if !batch.State.Live() {
 		return nil
 	}
+	outcome := Summarize(batch, all)
 	batch.State = ladder.StateCanceled
-	if filled.Sign() > 0 {
+	if outcome.Filled.Sign() > 0 {
 		batch.State = ladder.StateDone
 	}
 	if err := e.DB.SaveLadder(ctx, batch); err != nil {
 		return err
 	}
-	summary := fmt.Sprintf("%s %s %s 종료 · 체결 %s",
-		batch.Venue.Label(), batch.Symbol, batch.Side.Label(), filled)
-	if filled.Sign() > 0 {
-		summary += fmt.Sprintf(" · 평균 %s", amount.DivRound(filled, 8))
-	}
-	return e.DB.Notify(ctx, "ladder", batch.ID, summary)
+	return e.DB.Notify(ctx, "ladder", batch.ID, outcome.Report())
 }

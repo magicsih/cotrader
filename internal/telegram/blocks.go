@@ -3,8 +3,9 @@ package telegram
 
 import (
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/magicsih/cotrader/internal/money"
 
 	"github.com/shopspring/decimal"
 )
@@ -154,33 +155,10 @@ func Since(d time.Duration) string {
 }
 
 // Number formats an amount with thousands separators and no trailing zeros.
-func Number(value decimal.Decimal) string {
-	text := value.String()
-	negative := strings.HasPrefix(text, "-")
-	text = strings.TrimPrefix(text, "-")
-	whole, fraction, _ := strings.Cut(text, ".")
-
-	var grouped strings.Builder
-	for i, digit := range whole {
-		if i > 0 && (len(whole)-i)%3 == 0 {
-			grouped.WriteByte(',')
-		}
-		grouped.WriteRune(digit)
-	}
-	out := grouped.String()
-	if fraction = strings.TrimRight(fraction, "0"); fraction != "" {
-		out += "." + fraction
-	}
-	if negative && out != "0" {
-		out = "-" + out
-	}
-	return out
-}
+func Number(value decimal.Decimal) string { return money.Format(value) }
 
 // Percent renders a fraction as a percentage, so 0.025 reads as 2.5%.
-func Percent(fraction decimal.Decimal) string {
-	return Number(fraction.Shift(2)) + "%"
-}
+func Percent(fraction decimal.Decimal) string { return money.Percent(fraction) }
 
 // Money pairs an amount with its currency.
 func Money(value decimal.Decimal, currency string) string {
