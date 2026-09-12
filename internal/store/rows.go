@@ -164,3 +164,63 @@ func (e *Event) Receipt() string {
 	}
 	return e.ID[:8]
 }
+
+// Unset marks a numeric draft field the operator has not chosen yet. Zero is a
+// legitimate answer for an offset, so absence needs its own value.
+var Unset = decimal.NewFromInt(-1)
+
+// Step is the next thing the draft needs before it can be priced. It is
+// derived from what is filled in rather than stored, so the flow cannot get
+// out of step with the data.
+func (l *Ladder) Step() string {
+	switch {
+	case l.Symbol == "":
+		return "symbol"
+	case l.Basis == "":
+		return "basis"
+	case l.BasePrice.Sign() <= 0:
+		return "base"
+	case l.StartPct.IsNegative():
+		return "start"
+	case l.EndPct.IsNegative():
+		return "end"
+	case l.Rungs <= 0:
+		return "rungs"
+	case l.Total.Sign() <= 0:
+		return "total"
+	default:
+		return "preview"
+	}
+}
+
+// Clear returns the draft to an earlier question, dropping the answers that
+// depended on the one being changed.
+func (l *Ladder) Clear(step string) {
+	switch step {
+	case "symbol":
+		l.Symbol, l.Basis, l.BasePrice = "", "", decimal.Zero
+		fallthrough
+	case "basis":
+		if step == "basis" {
+			l.Basis, l.BasePrice = "", decimal.Zero
+		}
+		fallthrough
+	case "base":
+		if step == "base" {
+			l.BasePrice = decimal.Zero
+		}
+		l.StartPct, l.EndPct = Unset, Unset
+		l.Rungs, l.Total = 0, decimal.Zero
+	case "start":
+		l.StartPct, l.EndPct = Unset, Unset
+		l.Rungs, l.Total = 0, decimal.Zero
+	case "end":
+		l.EndPct = Unset
+		l.Rungs, l.Total = 0, decimal.Zero
+	case "rungs":
+		l.Rungs, l.Total = 0, decimal.Zero
+	case "total":
+		l.Total = decimal.Zero
+	}
+	l.EntryField, l.EntryValue = "", ""
+}
