@@ -3,15 +3,20 @@ package toss
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/magicsih/cotrader/internal/broker"
 	"github.com/magicsih/cotrader/internal/market"
 	"github.com/shopspring/decimal"
 )
+
+// holdingShape logs the shape of a holdings record once per process.
+var holdingShape sync.Once
 
 // Account is one account on the Toss login.
 type Account struct {
@@ -67,9 +72,17 @@ func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	var accounts []Account
-	if err := decode("/api/v1/accounts", result, &accounts); err != nil {
-		return nil, err
+	records, err := listOf(result, "accounts")
+	if err != nil {
+		return nil, broker.Fail("toss-invalid-response-api-v1-accounts")
+	}
+	accounts := make([]Account, 0, len(records))
+	for _, record := range records {
+		var account Account
+		if err := json.Unmarshal(record, &account); err != nil {
+			return nil, broker.Fail("toss-invalid-response-api-v1-accounts")
+		}
+		accounts = append(accounts, account)
 	}
 	return accounts, nil
 }
@@ -100,9 +113,16 @@ func (c *Client) Holdings(ctx context.Context) ([]Holding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var records []json.RawMessage
-	if err := decode("/api/v1/holdings", result, &records); err != nil {
-		return nil, err
+	records, err := listOf(result, "holdings")
+	if err != nil {
+		return nil, broker.Fail("toss-invalid-response-api-v1-holdings")
+	}
+	// The average-cost field name has never been confirmed against a live
+	// response, so the keys of one record are logged once. Names only.
+	if len(records) > 0 {
+		holdingShape.Do(func() {
+			slog.Info("토스 보유 응답 필드", "fields", fieldNames(records[0]))
+		})
 	}
 	holdings := make([]Holding, 0, len(records))
 	for _, record := range records {
@@ -122,14 +142,18 @@ func (c *Client) CommissionRate(ctx context.Context) (decimal.Decimal, error) {
 	if err != nil {
 		return decimal.Zero, err
 	}
-	var rows []struct {
-		MarketCountry  string          `json:"marketCountry"`
-		CommissionRate decimal.Decimal `json:"commissionRate"`
+	records, err := listOf(result, "commissions")
+	if err != nil {
+		return decimal.Zero, broker.Fail("toss-invalid-response-api-v1-commissions")
 	}
-	if err := decode("/api/v1/commissions", result, &rows); err != nil {
-		return decimal.Zero, err
-	}
-	for _, row := range rows {
+	for _, record := range records {
+		var row struct {
+			MarketCountry  string          `json:"marketCountry"`
+			CommissionRate decimal.Decimal `json:"commissionRate"`
+		}
+		if err := json.Unmarshal(record, &row); err != nil {
+			return decimal.Zero, broker.Fail("toss-invalid-response-api-v1-commissions")
+		}
 		if row.MarketCountry == "US" {
 			return row.CommissionRate, nil
 		}
