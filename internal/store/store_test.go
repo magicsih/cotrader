@@ -1,49 +1,25 @@
-package store
+package store_test
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/magicsih/cotrader/internal/broker"
-	"github.com/magicsih/cotrader/internal/config"
 	"github.com/magicsih/cotrader/internal/ids"
 	"github.com/magicsih/cotrader/internal/ladder"
 	"github.com/magicsih/cotrader/internal/market"
+	"github.com/magicsih/cotrader/internal/store"
+	"github.com/magicsih/cotrader/internal/store/storetest"
 	"github.com/shopspring/decimal"
 )
 
-// dsn returns the throwaway MySQL scripts/test-mysql.sh provides, or skips.
-func dsn(t *testing.T) config.Secret {
+// fresh returns a migrated database of this test's own.
+func fresh(t *testing.T) *store.DB {
 	t.Helper()
-	value := os.Getenv("COTRADER_TEST_DSN")
-	if value == "" {
-		t.Skip("COTRADER_TEST_DSN이 없습니다. bash scripts/test-mysql.sh로 실행하세요")
-	}
-	return config.Secret(value)
-}
-
-// fresh returns a migrated database with every table emptied.
-func fresh(t *testing.T) *DB {
-	t.Helper()
-	ctx := context.Background()
-	db, err := Open(ctx, dsn(t))
-	if err != nil {
-		t.Fatalf("연결 실패: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("마이그레이션 실패: %v", err)
-	}
-	for _, table := range []string{"ladder_orders", "ladders", "transfers", "events", "runtime_state"} {
-		if _, err := db.sql.ExecContext(ctx, "DELETE FROM "+table); err != nil {
-			t.Fatalf("%s 비우기 실패: %v", table, err)
-		}
-	}
-	return db
+	return storetest.Fresh(t)
 }
 
 func dec(t *testing.T, s string) decimal.Decimal {
@@ -55,9 +31,9 @@ func dec(t *testing.T, s string) decimal.Decimal {
 	return d
 }
 
-func sampleLadder(t *testing.T) *Ladder {
+func sampleLadder(t *testing.T) *store.Ladder {
 	t.Helper()
-	return &Ladder{
+	return &store.Ladder{
 		ID: ids.New(), Venue: market.Upbit, Symbol: "KRW-SOL", Side: market.Sell,
 		Basis: ladder.BasisQuote, BasePrice: dec(t, "200000"),
 		StartPct: dec(t, "0.025"), EndPct: dec(t, "0.1"), Rungs: 10,
@@ -66,7 +42,7 @@ func sampleLadder(t *testing.T) *Ladder {
 }
 
 func TestOpenRejectsAUrlStyleDsn(t *testing.T) {
-	_, err := Open(context.Background(), "mysql+asyncmy://user:pass@127.0.0.1:3306/cotrader")
+	_, err := store.Open(context.Background(), "mysql+asyncmy://user:pass@127.0.0.1:3306/cotrader")
 	if err == nil {
 		t.Fatal("URL 형식이 통과했습니다")
 	}
@@ -106,12 +82,10 @@ func TestOnlyOneProcessHoldsTheLock(t *testing.T) {
 		t.Errorf("보유자의 확인이 실패했습니다: %v", err)
 	}
 
-	second, err := Open(ctx, dsn(t))
-	if err != nil {
-		t.Fatalf("두 번째 연결 실패: %v", err)
-	}
-	defer second.Close()
-	if _, err := second.Acquire(ctx, name); !errors.Is(err, ErrLockHeld) {
+	// A named lock is held by the MySQL session, not by a schema, so a second
+	// connection anywhere on the same server competes for the same lock.
+	second := fresh(t)
+	if _, err := second.Acquire(ctx, name); !errors.Is(err, store.ErrLockHeld) {
 		t.Errorf("두 번째 인스턴스가 잠금을 얻었습니다: %v", err)
 	}
 
@@ -168,7 +142,7 @@ func TestSaveLadderReplacesInPlace(t *testing.T) {
 	if loaded.State != ladder.StateOpen || loaded.MessageID.Int64 != 4242 {
 		t.Errorf("갱신이 반영되지 않았습니다: %+v", loaded)
 	}
-	if _, err := db.Ladder(ctx, "없는-아이디"); !errors.Is(err, ErrNotFound) {
+	if _, err := db.Ladder(ctx, "없는-아이디"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("없는 사다리 조회 오류 %v", err)
 	}
 }
@@ -182,7 +156,7 @@ func TestBrokerIdIsUniqueButMayBeAbsent(t *testing.T) {
 	if err := db.SaveLadder(ctx, l); err != nil {
 		t.Fatalf("사다리 저장 실패: %v", err)
 	}
-	orders := []*Order{
+	orders := []*store.Order{
 		{ID: ids.New(), LadderID: l.ID, Rung: 0, Price: dec(t, "205000"), Quantity: dec(t, "2"), Status: broker.Prepared},
 		{ID: ids.New(), LadderID: l.ID, Rung: 1, Price: dec(t, "206700"), Quantity: dec(t, "2"), Status: broker.Prepared},
 	}
@@ -221,7 +195,7 @@ func TestSaveOrdersIsAllOrNothing(t *testing.T) {
 	if err := db.SaveLadder(ctx, l); err != nil {
 		t.Fatalf("사다리 저장 실패: %v", err)
 	}
-	orders := []*Order{
+	orders := []*store.Order{
 		{ID: ids.New(), LadderID: l.ID, Rung: 0, Price: dec(t, "205000"), Quantity: dec(t, "2"), Status: broker.Prepared},
 		// The same rung twice violates the unique key and fails the batch.
 		{ID: ids.New(), LadderID: l.ID, Rung: 0, Price: dec(t, "206700"), Quantity: dec(t, "2"), Status: broker.Prepared},
@@ -249,7 +223,7 @@ func TestActiveOrdersCarryTheirMarketAndSkipFinishedOnes(t *testing.T) {
 	}
 	rung := 0
 	for _, status := range broker.Statuses() {
-		if err := db.InsertOrders(ctx, []*Order{{
+		if err := db.InsertOrders(ctx, []*store.Order{{
 			ID: ids.New(), LadderID: l.ID, Rung: rung,
 			Price: dec(t, "205000"), Quantity: dec(t, "2"), Status: status,
 		}}); err != nil {
@@ -340,10 +314,10 @@ func TestRuntimeStateRoundTrip(t *testing.T) {
 func TestUnresolvedTransfersStayListed(t *testing.T) {
 	ctx := context.Background()
 	db := fresh(t)
-	statuses := []TransferStatus{TransferPrepared, TransferSending, TransferUnknown, TransferDone, TransferFailed}
+	statuses := []store.TransferStatus{store.TransferPrepared, store.TransferSending, store.TransferUnknown, store.TransferDone, store.TransferFailed}
 	for _, status := range statuses {
-		if err := db.InsertTransfer(ctx, &Transfer{
-			ID: ids.New(), Direction: ToCotrader, Currency: "KRW",
+		if err := db.InsertTransfer(ctx, &store.Transfer{
+			ID: ids.New(), Direction: store.ToCotrader, Currency: "KRW",
 			Amount: dec(t, "10000"), Identifier: "ct-" + string(status), Status: status,
 		}); err != nil {
 			t.Fatalf("%s 저장 실패: %v", status, err)
@@ -357,7 +331,7 @@ func TestUnresolvedTransfersStayListed(t *testing.T) {
 		t.Fatalf("미확인 이체 %d건, want 2", len(unresolved))
 	}
 	for _, transfer := range unresolved {
-		if transfer.Status != TransferSending && transfer.Status != TransferUnknown {
+		if transfer.Status != store.TransferSending && transfer.Status != store.TransferUnknown {
 			t.Errorf("확정된 이체 %s가 포함되었습니다", transfer.Status)
 		}
 	}
@@ -367,13 +341,13 @@ func TestUnresolvedTransfersStayListed(t *testing.T) {
 func TestTransferIdentifierIsUnique(t *testing.T) {
 	ctx := context.Background()
 	db := fresh(t)
-	first := &Transfer{ID: ids.New(), Direction: ToMain, Currency: "KRW",
-		Amount: dec(t, "10000"), Identifier: "ct-same", Status: TransferPrepared}
+	first := &store.Transfer{ID: ids.New(), Direction: store.ToMain, Currency: "KRW",
+		Amount: dec(t, "10000"), Identifier: "ct-same", Status: store.TransferPrepared}
 	if err := db.InsertTransfer(ctx, first); err != nil {
 		t.Fatalf("저장 실패: %v", err)
 	}
-	second := &Transfer{ID: ids.New(), Direction: ToMain, Currency: "KRW",
-		Amount: dec(t, "20000"), Identifier: "ct-same", Status: TransferPrepared}
+	second := &store.Transfer{ID: ids.New(), Direction: store.ToMain, Currency: "KRW",
+		Amount: dec(t, "20000"), Identifier: "ct-same", Status: store.TransferPrepared}
 	if err := db.InsertTransfer(ctx, second); err == nil {
 		t.Error("같은 식별자가 두 번 저장되었습니다")
 	}
@@ -385,12 +359,12 @@ func TestPruneDraftsLeavesLiveLaddersAlone(t *testing.T) {
 	draft := sampleLadder(t)
 	live := sampleLadder(t)
 	live.State = ladder.StateOpen
-	for _, l := range []*Ladder{draft, live} {
+	for _, l := range []*store.Ladder{draft, live} {
 		if err := db.SaveLadder(ctx, l); err != nil {
 			t.Fatalf("저장 실패: %v", err)
 		}
 	}
-	if _, err := db.sql.ExecContext(ctx,
+	if _, err := db.SQL().ExecContext(ctx,
 		`UPDATE ladders SET updated_at = ? WHERE id IN (?,?)`,
 		time.Now().UTC().Add(-48*time.Hour), draft.ID, live.ID); err != nil {
 		t.Fatalf("시각 조정 실패: %v", err)
@@ -398,7 +372,7 @@ func TestPruneDraftsLeavesLiveLaddersAlone(t *testing.T) {
 	if err := db.PruneDrafts(ctx, 24*time.Hour); err != nil {
 		t.Fatalf("정리 실패: %v", err)
 	}
-	if _, err := db.Ladder(ctx, draft.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := db.Ladder(ctx, draft.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("오래된 초안이 남았습니다: %v", err)
 	}
 	if _, err := db.Ladder(ctx, live.ID); err != nil {
@@ -414,8 +388,8 @@ func TestPruneDraftsLeavesLiveLaddersAlone(t *testing.T) {
 func TestUpdateOrderReportsAMissingRow(t *testing.T) {
 	ctx := context.Background()
 	db := fresh(t)
-	err := db.UpdateOrder(ctx, &Order{ID: ids.New(), Status: broker.Pending})
-	if !errors.Is(err, ErrNotFound) {
+	err := db.UpdateOrder(ctx, &store.Order{ID: ids.New(), Status: broker.Pending})
+	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("없는 주문 갱신 오류 %v", err)
 	}
 }
@@ -425,8 +399,8 @@ func TestUpdateOrderReportsAMissingRow(t *testing.T) {
 func TestUpdateTransferReportsAMissingRow(t *testing.T) {
 	ctx := context.Background()
 	db := fresh(t)
-	err := db.UpdateTransfer(ctx, &Transfer{ID: ids.New(), Status: TransferDone})
-	if !errors.Is(err, ErrNotFound) {
+	err := db.UpdateTransfer(ctx, &store.Transfer{ID: ids.New(), Status: store.TransferDone})
+	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("없는 이체 갱신 오류 %v", err)
 	}
 }

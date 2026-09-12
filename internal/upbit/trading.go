@@ -381,3 +381,135 @@ func sideOf(raw string) market.Side {
 
 // plain renders a decimal without an exponent, which Upbit requires.
 func plain(d decimal.Decimal) string { return d.String() }
+
+// Pocket is one sub-account of the Upbit login.
+type Pocket struct {
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// PocketKey is one API key and what it is allowed to do.
+type PocketKey struct {
+	AccessKey   string   `json:"access_key"`
+	Permissions []string `json:"permissions"`
+}
+
+// Pockets lists the sub-accounts. It needs the administrator key.
+func (c *Client) Pockets(ctx context.Context) ([]Pocket, error) {
+	payload, err := c.request(ctx, http.MethodGet, "/v1/pockets", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	var pockets []Pocket
+	if err := decode(payload, &pockets); err != nil {
+		return nil, err
+	}
+	return pockets, nil
+}
+
+// PocketKeys maps each sub-account to the keys that can act on it, which is
+// how a key is proven to belong to the pocket we think it does.
+func (c *Client) PocketKeys(ctx context.Context) (map[string][]PocketKey, error) {
+	payload, err := c.request(ctx, http.MethodGet, "/v1/pockets/api_keys", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		UUID string      `json:"uuid"`
+		Keys []PocketKey `json:"keys"`
+	}
+	if err := decode(payload, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]PocketKey, len(rows))
+	for _, row := range rows {
+		out[row.UUID] = row.Keys
+	}
+	return out, nil
+}
+
+// TransferRequest moves one currency between two pockets of the same account.
+type TransferRequest struct {
+	From       string
+	To         string
+	Currency   string
+	Amount     decimal.Decimal
+	Identifier string
+}
+
+func (r TransferRequest) params() Params {
+	return Params{}.
+		With("from", r.From).
+		With("to", r.To).
+		With("currency", r.Currency).
+		With("amount", plain(r.Amount)).
+		With("identifier", r.Identifier)
+}
+
+// Transfer is one movement as Upbit reports it.
+type Transfer struct {
+	From       string          `json:"from"`
+	To         string          `json:"to"`
+	Currency   string          `json:"currency"`
+	Amount     decimal.Decimal `json:"amount"`
+	Identifier string          `json:"identifier"`
+	State      string          `json:"state"`
+}
+
+// Done reports whether the movement has completed.
+func (t Transfer) Done() bool { return t.State == "done" }
+
+// Settled reports whether the movement has reached an outcome either way.
+func (t Transfer) Settled() bool { return t.State == "done" || t.State == "failed" }
+
+// Submit moves assets between pockets.
+//
+// A failure whose effect we cannot read is reported as ambiguous: the transfer
+// may have happened, so it must be looked up by identifier rather than sent
+// again.
+func (c *Client) Submit(ctx context.Context, req TransferRequest) (*Transfer, error) {
+	if req.From == "" || req.To == "" || req.From == req.To {
+		return nil, broker.Fail("upbit-invalid-transfer-pockets")
+	}
+	if req.Identifier == "" || req.Amount.Sign() <= 0 {
+		return nil, broker.Fail("upbit-invalid-transfer")
+	}
+	payload, err := c.request(ctx, http.MethodPost, TransferPath, req.params(), true)
+	if err != nil {
+		return nil, err
+	}
+	var transfer Transfer
+	if err := decode(payload, &transfer); err != nil {
+		return nil, broker.Unresolved("upbit-invalid-transfer-response")
+	}
+	if transfer.Identifier != req.Identifier {
+		return nil, broker.Unresolved("upbit-invalid-transfer-response")
+	}
+	return &transfer, nil
+}
+
+// Transfers looks movements up by the identifiers we chose. Upbit keeps them
+// for a limited window, so the caller supplies the range to search.
+func (c *Client) Transfers(ctx context.Context, identifiers []string, start, end time.Time) ([]Transfer, error) {
+	if len(identifiers) == 0 {
+		return nil, nil
+	}
+	params := Params{}
+	for _, identifier := range identifiers {
+		params = params.With("identifiers[]", identifier)
+	}
+	params = params.
+		With("start_time", start.UTC().Format(time.RFC3339)).
+		With("end_time", end.UTC().Format(time.RFC3339)).
+		With("limit", "100")
+	payload, err := c.request(ctx, http.MethodGet, TransferPath, params, true)
+	if err != nil {
+		return nil, err
+	}
+	var transfers []Transfer
+	if err := decode(payload, &transfers); err != nil {
+		return nil, err
+	}
+	return transfers, nil
+}
