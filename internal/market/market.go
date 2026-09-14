@@ -210,13 +210,14 @@ func MinQuantity(price decimal.Decimal, v Venue) decimal.Decimal {
 	// Exact ceiling: QuoRem truncates, so a non-zero remainder needs one more unit.
 	quantity, remainder := total.QuoRem(price, places(v))
 	if !remainder.IsZero() {
-		quantity = quantity.Add(unit(v))
+		quantity = quantity.Add(Unit(v))
 	}
 	return quantity
 }
 
-// unit is the smallest tradable quantity increment on v.
-func unit(v Venue) decimal.Decimal {
+// Unit is the smallest tradable quantity increment on v: one whole share on
+// Toss, one satoshi-sized step on Upbit.
+func Unit(v Venue) decimal.Decimal {
 	if v.IsUpbit() {
 		return smallestTick
 	}
