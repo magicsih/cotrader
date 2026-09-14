@@ -242,6 +242,7 @@ func (a *App) previewScreen(ctx context.Context, draft *store.Ladder) (screen, e
 	} else {
 		blocks = append(blocks, table)
 	}
+	blocks = append(blocks, telegram.Footer(rungOrderNote(draft.Side)))
 
 	keyboard := telegram.Keyboard{}
 	if len(warnings) > 0 {
@@ -256,6 +257,18 @@ func (a *App) previewScreen(ctx context.Context, draft *store.Ladder) (screen, e
 		telegram.Action("총량 변경", fmt.Sprintf("l:%s:back:total", compact(draft.ID)))))
 	keyboard = append(keyboard, backRow(draft, "basis"))
 	return view(blocks, keyboard), nil
+}
+
+// rungOrderNote spells out what the step numbers mean. The table is sorted by
+// distance from the reference price, not by price, so on a buy the first row
+// is the dearest and reads as backwards until that is said out loud.
+func rungOrderNote(side market.Side) string {
+	if side == market.Buy {
+		return "1단계가 기준가에 가장 가까운 최고가이며 주문도 1단계부터 보냅니다. " +
+			"나누어 떨어지지 않은 금액은 싼 단계부터 채웁니다."
+	}
+	return "1단계가 기준가에 가장 가까운 최저가이며 주문도 1단계부터 보냅니다. " +
+		"나누어 떨어지지 않은 수량은 비싼 단계부터 채웁니다."
 }
 
 // previewWarnings collects every reason not to send, so the operator sees all

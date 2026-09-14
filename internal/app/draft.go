@@ -16,9 +16,14 @@ import (
 )
 
 // Offsets the keyboard offers, in basis points, so 250 reads as 2.5%.
+//
+// Both rows walk the same 0.5·1·2·3·5·10 scale, with the end row shifted one
+// stop out so it always has somewhere to go. Wider ranges were the default
+// before and the far rungs simply never traded; anything beyond these still
+// goes in through 직접 입력.
 var (
-	startOffsets = []int{100, 250, 500, 750, 1000, 2000}
-	endOffsets   = []int{500, 1000, 2000, 3000, 5000, 10000}
+	startOffsets = []int{50, 100, 200, 300, 500, 1000}
+	endOffsets   = []int{100, 200, 300, 500, 1000, 2000}
 	rungChoices  = []int{3, 5, 10, 15, 20}
 )
 

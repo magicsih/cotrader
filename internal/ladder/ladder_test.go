@@ -110,22 +110,55 @@ func TestGeometricSpacingKeepsRatioConstant(t *testing.T) {
 	}
 }
 
-func TestSellSplitsQuantityEvenlyAndGivesRemainderToNearestRung(t *testing.T) {
+// A sell sells dearest last, so the quantity that does not divide evenly must
+// land on the far, dearest rungs rather than swelling the nearest one.
+func TestSellSpreadsRemainderOntoTheDearestRungs(t *testing.T) {
 	spec := sellSpec(t)
-	spec.Total = dec(t, "20.00000007") // does not divide evenly into 10
+	spec.Total = dec(t, "20.00000007") // seven units over an even split by ten
 	plan := mustBuild(t, spec)
 
 	if got := plan.TotalQuantity(); !got.Equal(spec.Total) {
 		t.Errorf("총 수량 %s, want %s", got, spec.Total)
 	}
-	each := plan.Rungs[1].Quantity
-	for i, r := range plan.Rungs[1:] {
-		if !r.Quantity.Equal(each) {
-			t.Errorf("%d번 단계 수량 %s가 %s와 다릅니다", i+1, r.Quantity, each)
+	step := market.Unit(spec.Venue)
+	each := plan.Rungs[0].Quantity
+	for i, r := range plan.Rungs {
+		want := each
+		if i >= len(plan.Rungs)-7 {
+			want = each.Add(step)
+		}
+		if !r.Quantity.Equal(want) {
+			t.Errorf("%d번 단계 수량 %s, want %s", i+1, r.Quantity, want)
 		}
 	}
-	if !plan.Rungs[0].Quantity.GreaterThan(each) {
-		t.Errorf("나머지가 0번 단계에 실리지 않았습니다: %s vs %s", plan.Rungs[0].Quantity, each)
+}
+
+// Toss trades whole shares, so an even cash split leaves a real remainder. It
+// has to buy extra shares at the cheap end; piling it onto rung 1 both raised
+// the average cost and put a quarter of the position on the dearest price.
+func TestTossBuyPutsLeftoverCashOnTheCheapestRungs(t *testing.T) {
+	spec := Spec{
+		Venue: market.Toss, Symbol: "QNT", Side: market.Buy,
+		Base: dec(t, "3"), StartPct: dec(t, "0.005"), EndPct: dec(t, "0.05"),
+		Rungs: 20, Total: dec(t, "150"),
+	}
+	plan := mustBuild(t, spec)
+
+	if plan.TotalAmount().GreaterThan(spec.Total) {
+		t.Fatalf("총액 %s가 예산 %s를 넘습니다", plan.TotalAmount(), spec.Total)
+	}
+	nearest, furthest := plan.Rungs[0], plan.Rungs[len(plan.Rungs)-1]
+	if nearest.Quantity.GreaterThan(furthest.Quantity) {
+		t.Errorf("최고가 %s에 %s주, 최저가 %s에 %s주로 비싼 쪽이 더 많습니다",
+			nearest.Price, nearest.Quantity, furthest.Price, furthest.Quantity)
+	}
+	// One share is the most any rung may differ by, so nothing is lopsided.
+	low, high := plan.Rungs[0].Quantity, plan.Rungs[0].Quantity
+	for _, r := range plan.Rungs {
+		low, high = decimal.Min(low, r.Quantity), decimal.Max(high, r.Quantity)
+	}
+	if high.Sub(low).GreaterThan(decimal.NewFromInt(1)) {
+		t.Errorf("단계별 수량이 %s주에서 %s주까지 벌어졌습니다", low, high)
 	}
 }
 
@@ -143,11 +176,12 @@ func TestBuyNeverExceedsBudgetAndBeatsFlatQuantity(t *testing.T) {
 	if !plan.AveragePrice().LessThan(midpoint) {
 		t.Errorf("평균 단가 %s가 가격 구간 중앙값 %s보다 낮지 않습니다", plan.AveragePrice(), midpoint)
 	}
-	// Nothing is left on the table: the unspent remainder is smaller than one
-	// more unit at the nearest rung.
+	// Nothing is left on the table: the unspent remainder cannot buy one more
+	// unit even at the cheapest rung, the last one.
+	cheapest := plan.Rungs[len(plan.Rungs)-1].Price
 	unspent := spec.Total.Sub(plan.TotalAmount())
-	if unspent.GreaterThanOrEqual(plan.Rungs[0].Price) {
-		t.Errorf("미사용 예산 %s가 0번 단계 가격 %s 이상입니다", unspent, plan.Rungs[0].Price)
+	if unspent.GreaterThanOrEqual(cheapest.Mul(market.Unit(spec.Venue))) {
+		t.Errorf("미사용 예산 %s로 최저가 %s에서 더 살 수 있습니다", unspent, cheapest)
 	}
 }
 

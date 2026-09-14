@@ -222,8 +222,14 @@ func snap(raw []decimal.Decimal, venue market.Venue, mode market.Rounding) []dec
 
 // size splits the total across the priced rungs. A sell divides the quantity
 // evenly; a buy divides the cash evenly, which buys more shares at the lower
-// prices and pulls the average cost down. Either way the remainder goes to
-// rung 0, the rung nearest Base, because that is the likeliest to fill.
+// prices and pulls the average cost down.
+//
+// Rounding to whole tradable units always leaves something over, and it is
+// handed out from the far end of the ladder inwards: the cheapest rung on a
+// buy, the dearest on a sell. That is the end that improves the fill, and
+// spreading it one unit at a time stops any single rung from swelling. On
+// Toss, where a share is indivisible, piling the remainder onto one rung put
+// a quarter of a 20-rung buy on its most expensive price.
 func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 	rungs := make([]Rung, len(prices))
 	for i, price := range prices {
@@ -236,7 +242,7 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 		for i := range rungs {
 			rungs[i].Quantity = each
 		}
-		rungs[0].Quantity = rungs[0].Quantity.Add(leftover)
+		spreadQuantity(rungs, leftover, spec.Venue)
 	} else {
 		per := spec.Total.DivRound(decimal.NewFromInt(int64(len(prices))), divPlaces)
 		spent := decimal.Zero
@@ -244,8 +250,7 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 			rungs[i].Quantity = market.QuantityFor(per, rungs[i].Price, spec.Venue)
 			spent = spent.Add(rungs[i].Amount())
 		}
-		extra := market.QuantityFor(spec.Total.Sub(spent), rungs[0].Price, spec.Venue)
-		rungs[0].Quantity = rungs[0].Quantity.Add(extra)
+		spreadCash(rungs, spec.Total.Sub(spent), spec.Venue)
 	}
 
 	for _, r := range rungs {
@@ -256,6 +261,39 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 		}
 	}
 	return rungs, nil
+}
+
+// spreadQuantity hands leftover quantity out one unit at a time, from the rung
+// furthest from Base inwards. Divide leaves under one unit per rung, so a
+// single pass always exhausts it.
+func spreadQuantity(rungs []Rung, leftover decimal.Decimal, venue market.Venue) {
+	step := market.Unit(venue)
+	for i := len(rungs) - 1; i >= 0 && leftover.GreaterThanOrEqual(step); i-- {
+		rungs[i].Quantity = rungs[i].Quantity.Add(step)
+		leftover = leftover.Sub(step)
+	}
+}
+
+// spreadCash spends what the even split could not, buying one unit at a time
+// starting at the cheapest rung. A full pass costs the sum of the rung prices
+// and the unspent cash is below that, so this settles in a pass or two; the
+// loop ends as soon as a pass can afford nothing.
+func spreadCash(rungs []Rung, cash decimal.Decimal, venue market.Venue) {
+	step := market.Unit(venue)
+	for {
+		bought := false
+		for i := len(rungs) - 1; i >= 0; i-- {
+			cost := rungs[i].Price.Mul(step)
+			if cost.GreaterThan(cash) {
+				continue
+			}
+			rungs[i].Quantity = rungs[i].Quantity.Add(step)
+			cash, bought = cash.Sub(cost), true
+		}
+		if !bought {
+			return
+		}
+	}
 }
 
 // State is where a ladder sits in its life.
