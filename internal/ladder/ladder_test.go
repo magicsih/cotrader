@@ -185,6 +185,49 @@ func TestBuyNeverExceedsBudgetAndBeatsFlatQuantity(t *testing.T) {
 	}
 }
 
+// The commission Upbit holds on top of a buy is what used to cost a ladder its
+// final rung: nineteen orders went in and the twentieth was refused, because
+// the whole balance had already gone into order amounts with nothing left to
+// hold the fee with. The shortfall was the fee on the entire budget, which is
+// smaller than one rung, so it always starved exactly the last one.
+func TestBuyReservesTheCommissionItWillBeCharged(t *testing.T) {
+	spec := Spec{
+		Venue: market.UpbitUSDT, Symbol: "USDT-BTC", Side: market.Buy,
+		Base: dec(t, "75450"), StartPct: dec(t, "0.0005"), EndPct: dec(t, "0.0155"),
+		Rungs: 20, Total: dec(t, "764.3555141"), Fee: dec(t, "0.0005"),
+	}
+	plan := mustBuild(t, spec)
+
+	if plan.Commitment().GreaterThan(spec.Total) {
+		t.Errorf("잠기는 금액 %s가 예산 %s를 넘습니다", plan.Commitment(), spec.Total)
+	}
+	// Only the commission is held back. Reserving more would leave cash idle.
+	if floor := spec.Total.Mul(dec(t, "0.999")); !plan.TotalAmount().GreaterThan(floor) {
+		t.Errorf("주문금액 %s가 예산 %s에 비해 지나치게 적습니다", plan.TotalAmount(), spec.Total)
+	}
+	// Without the reserve the same budget overshoots, which was the defect.
+	spec.Fee = decimal.Zero
+	bare := mustBuild(t, spec)
+	if !bare.TotalAmount().Mul(dec(t, "1.0005")).GreaterThan(spec.Total) {
+		t.Error("수수료를 빼지 않으면 예산을 넘어야 하는데 넘지 않습니다")
+	}
+}
+
+// A sell locks the holding as it stands and pays its commission out of the
+// proceeds, so a rate must not shrink the quantity being offered.
+func TestSellIgnoresTheCommission(t *testing.T) {
+	spec := sellSpec(t)
+	spec.Fee = dec(t, "0.0005")
+	plan := mustBuild(t, spec)
+
+	if !plan.TotalQuantity().Equal(spec.Total) {
+		t.Errorf("총 수량 %s가 총량 %s와 다릅니다", plan.TotalQuantity(), spec.Total)
+	}
+	if !plan.Commitment().Equal(spec.Total) {
+		t.Errorf("잠기는 수량 %s가 총량 %s와 다릅니다", plan.Commitment(), spec.Total)
+	}
+}
+
 func TestTossQuantitiesAreWholeShares(t *testing.T) {
 	for _, spec := range []Spec{
 		{Venue: market.Toss, Symbol: "QQQ", Side: market.Sell, Base: dec(t, "500"),
@@ -271,6 +314,7 @@ func TestValidateRejectsBadSpecs(t *testing.T) {
 		"분할 0":        func(s *Spec) { s.Rungs = 0 },
 		"분할 상한 초과":    func(s *Spec) { s.Rungs = maxRungs + 1 },
 		"총량 0":        func(s *Spec) { s.Total = decimal.Zero },
+		"음수 수수료율":     func(s *Spec) { s.Fee = dec(t, "-0.0005") },
 	}
 	for name, mutate := range cases {
 		spec := base
@@ -304,7 +348,11 @@ func TestSingleRungSitsAtTheStartPrice(t *testing.T) {
 // A readable dump of two realistic ladders, so the arithmetic can be reviewed
 // by eye rather than only by assertion.
 func TestPreviewTables(t *testing.T) {
-	for _, spec := range []Spec{sellSpec(t), buySpec(t)} {
+	// The buy carries a commission because a real one always does, and the
+	// reserve it forces is part of what wants reviewing by eye.
+	feeBuy := buySpec(t)
+	feeBuy.Fee = dec(t, "0.0005")
+	for _, spec := range []Spec{sellSpec(t), feeBuy} {
 		plan := mustBuild(t, spec)
 		var b strings.Builder
 		fmt.Fprintf(&b, "\n%s %s · %s\n", spec.Venue.Label(), spec.Symbol, spec.Side.Label())
@@ -320,6 +368,11 @@ func TestPreviewTables(t *testing.T) {
 		}
 		fmt.Fprintf(&b, "\n총 수량 %s · 총액 %s · 평균가 %s\n",
 			plan.TotalQuantity(), plan.TotalAmount().Round(0), plan.AveragePrice().Round(2))
+		if spec.Fee.Sign() > 0 {
+			fmt.Fprintf(&b, "수수료 %s · 잠기는 금액 %s · 예산 %s\n",
+				plan.Commitment().Sub(plan.TotalAmount()).Round(0),
+				plan.Commitment().Round(0), spec.Total)
+		}
 		t.Log(b.String())
 	}
 }

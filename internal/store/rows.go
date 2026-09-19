@@ -36,8 +36,10 @@ type Ladder struct {
 	UpdatedAt time.Time
 }
 
-// Spec rebuilds the calculation input from the stored fields.
-func (l *Ladder) Spec() ladder.Spec {
+// Spec rebuilds the calculation input from the stored fields. The commission
+// is not one of them: it is an exchange fact that is read fresh every time the
+// ladder is priced, so the caller has to supply it and cannot forget to.
+func (l *Ladder) Spec(fee decimal.Decimal) ladder.Spec {
 	return ladder.Spec{
 		Venue:    l.Venue,
 		Symbol:   l.Symbol,
@@ -47,6 +49,7 @@ func (l *Ladder) Spec() ladder.Spec {
 		EndPct:   l.EndPct,
 		Rungs:    l.Rungs,
 		Total:    l.Total,
+		Fee:      fee,
 	}
 }
 

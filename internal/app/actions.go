@@ -7,6 +7,7 @@ import (
 	"github.com/magicsih/cotrader/internal/broker"
 	"github.com/magicsih/cotrader/internal/ids"
 	"github.com/magicsih/cotrader/internal/ladder"
+	"github.com/magicsih/cotrader/internal/market"
 	"github.com/magicsih/cotrader/internal/orders"
 	"github.com/magicsih/cotrader/internal/store"
 	"github.com/magicsih/cotrader/internal/telegram"
@@ -44,7 +45,15 @@ func (a *App) submitDraft(ctx context.Context, messageID int64, short string, me
 		return a.show(ctx, messageID, a.errorScreen(fmt.Errorf("이미 전송한 주문입니다")))
 	}
 
-	plan, err := ladder.Build(draft.Spec())
+	// The commission is read again rather than carried over from the preview:
+	// it sizes a buy, and a rate that has moved since would build rungs the
+	// exchange no longer has room for.
+	chance, err := a.terms(ctx, draft)
+	if err != nil && draft.Side == market.Buy {
+		return a.show(ctx, messageID, a.errorScreen(
+			fmt.Errorf("수수료율을 확인하지 못해 매수 금액을 나눌 수 없습니다: %w", err)))
+	}
+	plan, err := ladder.Build(draft.Spec(buyFee(draft.Side, chance)))
 	if err != nil {
 		return a.show(ctx, messageID, a.errorScreen(err))
 	}
