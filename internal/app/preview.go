@@ -13,6 +13,8 @@ import (
 	"github.com/magicsih/cotrader/internal/store"
 	"github.com/magicsih/cotrader/internal/telegram"
 	"github.com/magicsih/cotrader/internal/toss"
+	"github.com/magicsih/cotrader/internal/upbit"
+	"github.com/shopspring/decimal"
 )
 
 // draftScreen asks whichever question comes next, or shows the preview.
@@ -192,9 +194,21 @@ func (a *App) keypadScreen(draft *store.Ladder) screen {
 // Nothing is submitted from here without the operator reading this screen: it
 // is the last point at which a wrong figure is cheap to fix.
 func (a *App) previewScreen(ctx context.Context, draft *store.Ladder) (screen, error) {
-	plan, err := ladder.Build(draft.Spec())
+	chance, chanceErr := a.terms(ctx, draft)
+	if chanceErr != nil && draft.Side == market.Buy {
+		// A buy cannot be divided without knowing the commission the venue will
+		// hold on top, and assuming a rate is exactly what costs the last rung.
+		return view([]telegram.Block{
+			header(draft),
+			telegram.Heading("이 설정으로는 주문할 수 없습니다"),
+			telegram.Paragraph("수수료율을 확인하지 못해 매수 금액을 나눌 수 없습니다: " + chanceErr.Error()),
+		}, telegram.Keyboard{backRow(draft, "rungs")}), nil
+	}
+
+	spec := draft.Spec(buyFee(draft.Side, chance))
+	plan, err := ladder.Build(spec)
 	if err != nil {
-		limit := ladder.MaxRungs(draft.Spec())
+		limit := ladder.MaxRungs(spec)
 		blocks := []telegram.Block{
 			header(draft),
 			telegram.Heading("이 설정으로는 주문할 수 없습니다"),
@@ -210,7 +224,7 @@ func (a *App) previewScreen(ctx context.Context, draft *store.Ladder) (screen, e
 		return view(blocks, keyboard), nil
 	}
 
-	warnings := a.previewWarnings(ctx, draft, plan)
+	warnings := a.previewWarnings(ctx, draft, plan, chance, chanceErr)
 	unit := draft.Venue.Currency()
 	rows := make([][]string, 0, len(plan.Rungs))
 	for _, rung := range plan.Rungs {
@@ -234,6 +248,14 @@ func (a *App) previewScreen(ctx context.Context, draft *store.Ladder) (screen, e
 		telegram.Money(plan.TotalAmount().Round(2), unit),
 		telegram.Number(plan.AveragePrice().Round(8)),
 		telegram.Percent(moved.Round(6)))
+	// The venue holds the commission on top of a buy, so what leaves the
+	// balance is more than the order amounts. Say so rather than let the
+	// operator compare the wrong figure against their cash.
+	if reserve := plan.Commitment().Sub(plan.TotalAmount()); reserve.Sign() > 0 {
+		summary += fmt.Sprintf("\n수수료 %s 별도 · 잠기는 금액 %s",
+			telegram.Money(reserve.Round(2), unit),
+			telegram.Money(plan.Commitment().Round(2), unit))
+	}
 
 	blocks := []telegram.Block{header(draft), telegram.Heading("미리보기"), telegram.Paragraph(summary)}
 	if len(plan.Rungs) > telegram.PageSize {
@@ -273,31 +295,57 @@ func rungOrderNote(side market.Side) string {
 
 // previewWarnings collects every reason not to send, so the operator sees all
 // of them at once rather than discovering them one rejection at a time.
-func (a *App) previewWarnings(ctx context.Context, draft *store.Ladder, plan ladder.Plan) []string {
+func (a *App) previewWarnings(
+	ctx context.Context, draft *store.Ladder, plan ladder.Plan,
+	chance *upbit.Chance, chanceErr error,
+) []string {
 	var warnings []string
 	if !a.Settings.OrdersEnabled(draft.Venue) {
 		warnings = append(warnings, draft.Venue.Label()+" 주문이 꺼져 있습니다")
 	}
 
+	// Commitment, not the order amount: a buy also has to cover the commission
+	// the venue holds, and comparing the amount alone passes a ladder the
+	// exchange will refuse on its final rung.
 	if available, err := a.available(ctx, draft); err != nil {
 		warnings = append(warnings, "가용 "+a.totalLabel(draft)+"을 확인하지 못했습니다: "+err.Error())
-	} else {
-		needed := plan.TotalQuantity()
-		if draft.Side == market.Buy {
-			needed = plan.TotalAmount()
-		}
-		if needed.GreaterThan(available) {
-			warnings = append(warnings, fmt.Sprintf("필요한 %s %s가 가용 %s보다 많습니다",
-				a.totalLabel(draft), telegram.Number(needed), telegram.Number(available)))
-		}
+	} else if needed := plan.Commitment(); needed.GreaterThan(available) {
+		warnings = append(warnings, fmt.Sprintf("필요한 %s %s가 가용 %s보다 많습니다",
+			a.totalLabel(draft), telegram.Number(needed), telegram.Number(available)))
 	}
 
 	if draft.Venue == market.Toss {
 		warnings = append(warnings, a.sessionWarnings(ctx)...)
 	} else {
-		warnings = append(warnings, a.upbitWarnings(ctx, draft, plan)...)
+		warnings = append(warnings, a.upbitWarnings(ctx, draft, plan, chance, chanceErr)...)
 	}
 	return warnings
+}
+
+// terms asks the venue what an order on this market may look like right now:
+// the commission it charges and the limits it enforces. Upbit answers both in
+// one call, so it is made once per screen and handed to everything that needs
+// it. Toss has no equivalent and reports nothing.
+func (a *App) terms(ctx context.Context, draft *store.Ladder) (*upbit.Chance, error) {
+	if !draft.Venue.IsUpbit() {
+		return nil, nil
+	}
+	if a.Accounts.Cotrader == nil {
+		return nil, fmt.Errorf("업비트가 연결되어 있지 않습니다")
+	}
+	return a.Accounts.Cotrader.Chance(ctx, draft.Symbol)
+}
+
+// buyFee is the commission to reserve on top of a purchase. Upbit holds it the
+// moment the order is placed rather than when it fills, so a ladder that turns
+// the whole balance into order amounts leaves nothing to hold it with and has
+// its last rung refused. Toss reports no rate here and reserves nothing, which
+// is the behaviour it has always had.
+func buyFee(side market.Side, chance *upbit.Chance) decimal.Decimal {
+	if side != market.Buy || chance == nil {
+		return decimal.Zero
+	}
+	return chance.Fee(market.Buy)
 }
 
 // sessionWarnings reports a closed US session, where a day order is refused.
@@ -319,16 +367,16 @@ func (a *App) sessionWarnings(ctx context.Context) []string {
 	return nil
 }
 
-// upbitWarnings asks Upbit itself to validate the ladder without creating an
-// order. The nearest and furthest rung bracket the price and size range, so
-// checking those two catches a limit the whole ladder would trip on.
-func (a *App) upbitWarnings(ctx context.Context, draft *store.Ladder, plan ladder.Plan) []string {
-	if a.Accounts.Cotrader == nil {
-		return []string{"업비트가 연결되어 있지 않습니다"}
-	}
-	chance, err := a.Accounts.Cotrader.Chance(ctx, draft.Symbol)
-	if err != nil {
-		return []string{"업비트 주문 가능 정보를 확인하지 못했습니다: " + err.Error()}
+// upbitWarnings has Upbit validate the ladder without creating an order, using
+// the terms already read for this screen. The nearest and furthest rung bracket
+// the price and size range, so checking those two catches a limit the whole
+// ladder would trip on.
+func (a *App) upbitWarnings(
+	ctx context.Context, draft *store.Ladder, plan ladder.Plan,
+	chance *upbit.Chance, chanceErr error,
+) []string {
+	if chanceErr != nil {
+		return []string{"업비트 주문 가능 정보를 확인하지 못했습니다: " + chanceErr.Error()}
 	}
 	if err := chance.Tradable(draft.Side); err != nil {
 		return []string{err.Error()}

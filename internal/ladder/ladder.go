@@ -34,6 +34,25 @@ type Spec struct {
 	Rungs int
 	// Total is the quantity to sell, or the cash to spend when buying.
 	Total decimal.Decimal
+	// Fee is the commission the venue adds on top of a purchase, so 0.0005
+	// means 0.05%. It has to be taken out of the budget before the cash is
+	// divided because the venue holds it the moment the order is placed, not
+	// when it fills. A sell leaves it at zero: there the commission comes out
+	// of the proceeds and the holding is locked exactly as it stands.
+	Fee decimal.Decimal
+}
+
+// budget is the cash a buy ladder may turn into order amounts. Spending the
+// whole balance would leave nothing to hold the commission with, and the rung
+// that runs out is always the last one: the shortfall is the fee on the whole
+// budget, which stays smaller than a single rung until the ladder passes 1/Fee
+// steps. The division truncates so the budget can never round up past Total.
+func (s Spec) budget() decimal.Decimal {
+	if s.Side != market.Buy || s.Fee.Sign() <= 0 {
+		return s.Total
+	}
+	budget, _ := s.Total.QuoRem(decimal.NewFromInt(1).Add(s.Fee), divPlaces)
+	return budget
 }
 
 // Rung is a single limit order in the ladder, numbered from the price nearest
@@ -77,6 +96,17 @@ func (p Plan) TotalAmount() decimal.Decimal {
 		sum = sum.Add(r.Amount())
 	}
 	return sum
+}
+
+// Commitment is what the venue takes out of the account once every rung is
+// sent: the quantity on a sell, and the cash plus the commission held on top
+// on a buy. This, rather than the order amount, is the figure that has to fit
+// in the balance.
+func (p Plan) Commitment() decimal.Decimal {
+	if p.Spec.Side == market.Sell {
+		return p.TotalQuantity()
+	}
+	return p.TotalAmount().Mul(decimal.NewFromInt(1).Add(p.Spec.Fee))
 }
 
 // AveragePrice is the quantity-weighted price of a complete fill.
@@ -126,6 +156,9 @@ func (s Spec) Validate() error {
 	if s.Total.Sign() <= 0 {
 		return fmt.Errorf("주문 총량은 0보다 커야 합니다")
 	}
+	if s.Fee.Sign() < 0 {
+		return fmt.Errorf("수수료율은 음수일 수 없습니다")
+	}
 	return nil
 }
 
@@ -148,7 +181,7 @@ func MaxRungs(spec Spec) int {
 	if need.Sign() <= 0 {
 		return 0
 	}
-	budget := spec.Total
+	budget := spec.budget()
 	if spec.Side == market.Buy {
 		need = need.Mul(start)
 	} else {
@@ -222,7 +255,8 @@ func snap(raw []decimal.Decimal, venue market.Venue, mode market.Rounding) []dec
 
 // size splits the total across the priced rungs. A sell divides the quantity
 // evenly; a buy divides the cash evenly, which buys more shares at the lower
-// prices and pulls the average cost down.
+// prices and pulls the average cost down. The buy divides its budget rather
+// than the whole total, so the commission the venue holds on top still fits.
 //
 // Rounding to whole tradable units always leaves something over, and it is
 // handed out from the far end of the ladder inwards: the cheapest rung on a
@@ -244,13 +278,14 @@ func size(spec Spec, prices []decimal.Decimal) ([]Rung, error) {
 		}
 		spreadQuantity(rungs, leftover, spec.Venue)
 	} else {
-		per := spec.Total.DivRound(decimal.NewFromInt(int64(len(prices))), divPlaces)
+		budget := spec.budget()
+		per := budget.DivRound(decimal.NewFromInt(int64(len(prices))), divPlaces)
 		spent := decimal.Zero
 		for i := range rungs {
 			rungs[i].Quantity = market.QuantityFor(per, rungs[i].Price, spec.Venue)
 			spent = spent.Add(rungs[i].Amount())
 		}
-		spreadCash(rungs, spec.Total.Sub(spent), spec.Venue)
+		spreadCash(rungs, budget.Sub(spent), spec.Venue)
 	}
 
 	for _, r := range rungs {
